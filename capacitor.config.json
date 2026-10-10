@@ -1,0 +1,21 @@
+{
+  "appId": "id.hasansatriah.readlify",
+  "appName": "Readlify",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#F7F1E7",
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 500,
+      "launchAutoHide": true,
+      "launchFadeOutDuration": 200,
+      "backgroundColor": "#F7F1E7"
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_readlify",
+      "iconColor": "#5F7A56"
+    }
+  }
+}

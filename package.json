@@ -1,0 +1,36 @@
+{
+  "name": "readlify-android",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Readlify — asisten kuliah anda (versi Android, dibungkus dengan Capacitor).",
+  "author": "@hasansatriah",
+  "license": "MIT",
+  "scripts": {
+    "build:web": "node -e \"require('fs').copyFileSync('node_modules/@capacitor/core/dist/capacitor.js','www/capacitor.js')\"",
+    "assets": "capacitor-assets generate --android",
+    "android:add": "cap add android && node scripts/prepare-android.mjs && npm run assets && cap sync android",
+    "android:sync": "npm run build:web && node scripts/prepare-android.mjs && cap sync android",
+    "android:open": "cap open android",
+    "icons": "python scripts/generate-icons.py",
+    "sounds": "python scripts/generate-sounds.py"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/browser": "^8.0.5",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/local-notifications": "^8.3.1",
+    "@capacitor/preferences": "^8.0.1",
+    "@capacitor/share": "^8.0.3",
+    "@capacitor/splash-screen": "^8.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
