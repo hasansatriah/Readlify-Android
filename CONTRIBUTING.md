@@ -19,18 +19,27 @@ cd www && python -m http.server 8080   # lalu buka http://localhost:8080
 ```
 Di browser, penyimpanan memakai `localStorage` dan fitur khusus Android (notifikasi, getar, bagikan
 berkas) dilewati dengan aman. Gunakan mode responsif di DevTools untuk memeriksa tampilan HP
-(< 600px) dan tablet (≥ 768px).
+(< 500px) dan tablet (≥ 500px).
 
 ## Peta kode
 | Berkas | Isi |
 |---|---|
 | `www/index.html` | struktur layar (sidebar tablet + tab bar HP) |
-| `www/styles.css` | token desain, komponen, lapisan mobile, lapisan layar lebar |
-| `www/app.js` | seluruh logika aplikasi |
+| `www/styles.css` | token desain, komponen desktop (= tablet), lapisan `html.is-phone`, lapisan `html.is-wide` |
+| `www/app.js` | logika inti: state, tugas, Pomodoro (berbasis `endAt`), Mode Fokus, pustaka, catatan, pengingat, siklus hidup Android |
 | `www/bridge.js` | satu-satunya tempat yang bicara dengan Android (`window.api`) |
+| `www/eddoc.js`, `docs-store.js`, `docs-parse.js` | pembaca dokumen; penyimpanan pustaka (Filesystem) dan pembaca Word/ODT/RTF |
+| `www/desa.js`, `achievements.js` | Village dan Pencapaian |
+| `scripts/check-compat.mjs` | `npm run check`: JS harus ES2019, CSS tanpa fitur baru |
 | `scripts/prepare-android.mjs` | menyiapkan proyek `android/` saat build |
 
 Aturan praktis: logika aplikasi di `app.js`, apa pun yang menyentuh platform di `bridge.js`.
+
+**Kompatibilitas WebView lama** (tablet Huawei tanpa pembaruan Chrome): jangan pakai `?.`, `??`, `replaceAll`, `.at()`,
+`structuredClone`, CSS `inset`, `:has()`, `:is()`, `dvh`. Jalankan `npm run check` sebelum commit. Tata letak dipilih JS:
+`<html>` diberi `is-wide` (sisi layar terpendek ≥ 500 dp) atau `is-phone`; tulis aturan HP dengan awalan `html.is-phone`.
+
+`www/styles.css` dihasilkan dari CSS desktop + lapisan Android; bila mengubah desktop, sinkronkan ke berkas ini.
 
 ## Membuat build sendiri
 Fork repositori ini, lalu **Actions → Build APK & AAB Android → Run workflow**. Tanpa keystore hasilnya

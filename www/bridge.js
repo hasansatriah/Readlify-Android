@@ -1,20 +1,28 @@
 /* ==========================================================================
-   bridge.js — jembatan antara app.js dan Android (Capacitor).
+   bridge.js — jembatan antara app.js (dan eddoc.js / desa.js) dengan Android (Capacitor).
 
-   Di versi Windows, tugas ini dikerjakan preload.js + main.js (Electron):
-   menyimpan data ke file JSON, jendela widget, notifikasi OS, buka link
-   eksternal. Di Android semua itu diganti plugin Capacitor, tapi app.js
-   tetap bicara lewat satu objek `window.api` — jadi logika aplikasinya
-   tidak perlu tahu sedang jalan di mana.
+   Di versi Windows, tugas ini dikerjakan preload.js + main.js (Electron): menyimpan data ke
+   file JSON, jendela widget, layar penuh, notifikasi OS, buka link eksternal. Di Android semua
+   itu diganti plugin Capacitor, tapi app.js tetap bicara lewat satu objek `window.api`, jadi
+   logika aplikasinya tidak perlu tahu sedang jalan di mana.
 
-   Aplikasi ini tanpa bundler, jadi plugin dipanggil lewat
-   Capacitor.registerPlugin('NamaPlugin') (runtime inti dimuat dari
-   capacitor.js). Kalau dibuka di browser biasa (untuk uji coba di PC),
-   semua fungsi punya cadangan yang aman: penyimpanan jatuh ke localStorage
-   dan fitur khusus Android dilewati tanpa error.
+   Aplikasi ini tanpa bundler, jadi plugin dipanggil lewat Capacitor.registerPlugin('NamaPlugin')
+   (runtime inti dimuat dari capacitor.js). Kalau dibuka di browser biasa (untuk uji coba di PC),
+   semua fungsi punya cadangan yang aman: penyimpanan jatuh ke localStorage dan fitur khusus
+   Android dilewati tanpa error.
+
+   Pustaka dokumen EdDOC (api.lib*) ada di docs-store.js, dan pembaca Word/ODT/RTF (api.parseDocument)
+   ada di docs-parse.js. Keduanya menambah fungsi ke window.api yang dibuat di sini.
+
+   Catatan kompatibilitas: berkas ini sengaja ditulis dengan sintaks JavaScript lama (tanpa `?.`
+   dan `??`) supaya jalan di WebView yang tidak diperbarui, mis. perangkat Huawei MatePad tanpa
+   layanan Google. `npm run check` memeriksanya.
    ========================================================================== */
 (() => {
   'use strict';
+
+  const APP_VERSION = '1.3.0';
+  const DONATE_URL = 'https://sociabuzz.com/hasansatriah/tribe';
 
   const Cap = window.Capacitor;
   const native = !!(Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform());
@@ -33,6 +41,8 @@
   const FS         = plug('Filesystem');
   const Haptics    = plug('Haptics');
   const SystemBars = plug('SystemBars');
+  const DevicePlug = plug('Device');
+  const KeepAwake  = plug('KeepAwake');
 
   // ------------------------------------------------------------------------
   // Penyimpanan data (pengganti file JSON di folder userData Electron)
@@ -65,6 +75,28 @@
   async function saveData(data) {
     try { await writeRaw(DATA_KEY, JSON.stringify(data)); return true; }
     catch (e) { console.error('Gagal menyimpan data:', e); return false; }
+  }
+
+  // ------------------------------------------------------------------------
+  // Info perangkat (dipakai untuk saran khusus Huawei/HarmonyOS & deteksi tablet)
+  // ------------------------------------------------------------------------
+  let deviceCache = null;
+  async function deviceInfo() {
+    if (deviceCache) return deviceCache;
+    let info = {};
+    if (DevicePlug) { try { info = await DevicePlug.getInfo(); } catch (_) { info = {}; } }
+    const ua = (navigator.userAgent || '');
+    const maker = String(info.manufacturer || '').toLowerCase();
+    const huawei = /huawei|honor/.test(maker) || /HUAWEI|HONOR|HMSCore|HarmonyOS|MatePad|BAH[0-9]|AGS[0-9]|BZK|BG[0-9]-|SCM-|AGR-|JDN/i.test(ua);
+    deviceCache = {
+      platform: native ? 'android' : 'web',
+      manufacturer: info.manufacturer || '',
+      model: info.model || '',
+      osVersion: info.osVersion || '',
+      webViewVersion: info.webViewVersion || '',
+      isHuawei: huawei,
+    };
+    return deviceCache;
   }
 
   // ------------------------------------------------------------------------
@@ -157,10 +189,17 @@
   // ------------------------------------------------------------------------
   // Siklus hidup aplikasi & tombol kembali
   // ------------------------------------------------------------------------
-  function onAppState(cb) {
-    if (AppPlugin) AppPlugin.addListener('appStateChange', (s) => cb(!!s.isActive));
-    else document.addEventListener('visibilitychange', () => cb(document.visibilityState === 'visible'));
+  const stateListeners = [];
+  let appActive = true;
+  function emitAppState(active) {
+    appActive = !!active;
+    stateListeners.forEach((cb) => { try { cb(appActive); } catch (e) { console.error(e); } });
+    schedulePresence();
   }
+  if (AppPlugin) AppPlugin.addListener('appStateChange', (s) => emitAppState(!!s.isActive));
+  else document.addEventListener('visibilitychange', () => emitAppState(document.visibilityState === 'visible'));
+
+  function onAppState(cb) { stateListeners.push(cb); }
 
   // handler() -> true kalau tombol kembali sudah "dipakai" (tutup modal, pindah layar, dst.).
   // Kalau belum, aplikasi diminimalkan (bukan dimatikan) supaya timer tetap jalan.
@@ -176,6 +215,51 @@
     });
   }
 
+  // Kehadiran di Readlify (dipakai Village): di Windows = jendela Readlify kehilangan fokus,
+  // di Android = aplikasi pindah ke latar belakang. Ditunda sebentar supaya dialog sistem
+  // (mis. izin notifikasi) yang cuma sekejap tidak dianggap "keluar".
+  const presenceListeners = [];
+  let presenceAway = false, presenceTimer = null;
+  function schedulePresence() {
+    clearTimeout(presenceTimer);
+    presenceTimer = setTimeout(() => {
+      const away = !appActive;
+      if (away === presenceAway) return;
+      presenceAway = away;
+      presenceListeners.forEach((cb) => { try { cb({ away, at: Date.now() }); } catch (e) { console.error(e); } });
+    }, 300);
+  }
+  function onPresence(cb) { presenceListeners.push(cb); }
+
+  // ------------------------------------------------------------------------
+  // Layar penuh (Mode Fokus): sembunyikan status bar & bilah navigasi, layar tetap menyala.
+  // ------------------------------------------------------------------------
+  const fsListeners = [];
+  let fullscreen = false;
+  let wakeLock = null;
+
+  async function keepAwake(on) {
+    try {
+      if (KeepAwake) { if (on) await KeepAwake.keepAwake(); else await KeepAwake.allowSleep(); return; }
+      if (on && navigator.wakeLock && navigator.wakeLock.request) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+    } catch (_) { /* tidak semua perangkat mendukung; abaikan */ }
+  }
+
+  async function setFullScreen(on) {
+    on = !!on;
+    if (SystemBars) {
+      try { await (on ? SystemBars.hide() : SystemBars.show()); } catch (_) { /* abaikan */ }
+    }
+    await keepAwake(on);
+    fullscreen = on;
+    // Di Windows kabar ini datang dari proses utama; di sini kita kirim sendiri.
+    setTimeout(() => fsListeners.forEach((cb) => { try { cb(fullscreen); } catch (e) { console.error(e); } }), 0);
+    return fullscreen;
+  }
+  function onFullScreenChange(cb) { fsListeners.push(cb); }
+
   // ------------------------------------------------------------------------
   // Hal-hal kecil
   // ------------------------------------------------------------------------
@@ -184,6 +268,8 @@
     if (Browser) { Browser.open({ url }).catch(() => window.open(url, '_blank', 'noopener')); }
     else window.open(url, '_blank', 'noopener');
   }
+  // Halaman donasi: URL-nya dipegang di sini, UI tidak bisa meminta URL lain.
+  async function openDonatePage() { openExternal(DONATE_URL); return true; }
 
   function vibrate(ms) {
     if (Haptics) Haptics.vibrate({ duration: ms || 300 }).catch(() => {});
@@ -197,6 +283,13 @@
   function setSystemBars(theme) {
     if (!SystemBars) return;
     SystemBars.setStyle({ style: theme === 'dark' ? 'DARK' : 'LIGHT' }).catch(() => {});
+  }
+
+  async function getVersion() {
+    if (AppPlugin && typeof AppPlugin.getInfo === 'function') {
+      try { const i = await AppPlugin.getInfo(); if (i && i.version) return i.version; } catch (_) { /* abaikan */ }
+    }
+    return APP_VERSION;
   }
 
   // ------------------------------------------------------------------------
@@ -227,12 +320,35 @@
     return 'downloaded';
   }
 
-  window.api = {
+  // Bagikan / simpan satu berkas biner (dipakai pustaka EdDOC: "Simpan ke…" / "Bagikan").
+  // uri = alamat file:// di penyimpanan aplikasi. Mengembalikan 'shared' | 'canceled' | 'unsupported'.
+  async function shareFile(uri, title) {
+    if (!Share) return 'unsupported';
+    try { await Share.share({ title: title || 'Dokumen', files: [uri], dialogTitle: 'Bagikan atau simpan dokumen' }); return 'shared'; }
+    catch (e) { return /cancel/i.test(String(e && (e.message || e))) ? 'canceled' : 'unsupported'; }
+  }
+
+  const noop = () => {};
+  const api = {
     platform: native ? 'android' : 'web',
-    loadData, saveData,
+    plug,                       // dipakai docs-store.js untuk memuat plugin Filesystem
+    loadData, saveData, getVersion, deviceInfo,
     notif,
-    onAppState, onBack,
-    openExternal, vibrate, tap, setSystemBars,
-    exportBackup,
+    onAppState, onBack, onPresence,
+    setFullScreen, onFullScreenChange,
+    openExternal, openDonatePage, vibrate, tap, setSystemBars, keepAwake,
+    exportBackup, shareFile,
+
+    // Fitur desktop yang tidak ada di HP: tetap didefinisikan supaya app.js tidak perlu
+    // memeriksa satu per satu. (Widget timer mengambang & dialog tutup jendela tidak berlaku;
+    // blokir medsos memang cuma pengingat di dalam aplikasi, jadi cukup mengembalikan "ok".)
+    openMiniTimer: noop, closeMiniTimer: noop, onMiniTimerClosed: noop,
+    sendTimerState: noop, onTimerState: noop, sendTimerControl: noop, onTimerControl: noop,
+    blockSites: async (domains) => ({ ok: true, soft: true, domains: domains || [] }),
+    unblockSites: async () => ({ ok: true, soft: true, domains: [] }),
+    setFocusGuard: noop, returnToApp: noop,
+    getFilePath: () => '',
+    eddocReady: noop,
   };
+  window.api = api;
 })();

@@ -1,12 +1,35 @@
 /* Readlify untuk Android — logika aplikasi.
-   Diturunkan dari renderer.js versi Windows (Electron): state, tugas, Pomodoro, daftar pustaka,
-   catatan, pengingat, dan pesan-pesannya sama. Yang berbeda hanya lapisan platform (lihat bridge.js). */
+   Diturunkan dari renderer.js versi Windows (Electron) 1.3.0: state, tugas, Pomodoro, Mode Fokus, daftar pustaka,
+   EdDOC, Pencapaian, Village, catatan, dan pesan-pesannya sama. Yang berbeda hanya lapisan platform
+   (lihat bridge.js) dan tata letak: tablet = tampilan desktop, HP = tab bar bawah. */
 (() => {
   'use strict';
 
   // Versi teks Syarat & Ketentuan yang sedang berlaku (tanggal pembaruan).
-  // Dicatat bersama waktu persetujuan di file data lokal.
   const TERMS_VERSION = '2026-10-09';
+
+  // Mode tata letak: tablet (sisi terpendek layar >= 500 dp) memakai tampilan desktop,
+  // HP memakai satu kolom + tab bar. Diputuskan sekali di awal & dipasang di <html>.
+  // (Huawei MatePad T8 potret ~533 dp: tablet. HP biasa 360-430 dp: HP.)
+  const WIDE_MIN_SHORT_SIDE = 500;
+  let wideMode = false;
+  function computeWide() {
+    const sw = (window.screen && window.screen.width) || window.innerWidth;
+    const sh = (window.screen && window.screen.height) || window.innerHeight;
+    const short = Math.min(sw, sh, window.innerWidth || 9999, Math.max(window.innerWidth || 0, window.innerHeight || 0));
+    return short >= WIDE_MIN_SHORT_SIDE;
+  }
+  function applyLayoutMode() {
+    const w = computeWide();
+    const root = document.documentElement;
+    const changed = w !== wideMode || !(root.classList.contains('is-wide') || root.classList.contains('is-phone'));
+    wideMode = w;
+    root.classList.toggle('is-wide', w);
+    root.classList.toggle('is-phone', !w);
+    return changed;
+  }
+  function isWide() { return wideMode; }
+  applyLayoutMode();
 
   // ============================================================
   // STATE
@@ -14,13 +37,16 @@
   const DEFAULT_STATE = () => ({
     userName: '',
     termsAccepted: false,
-    termsAcceptedAt: '',   // ISO timestamp persetujuan terakhir
-    termsVersion: '',      // versi S&K yang terakhir disetujui
-    termsHistory: [],      // riwayat: [{ version, acceptedAt }]
+    termsAcceptedAt: '',
+    termsVersion: '',
+    termsHistory: [],
     theme: 'cozy-light',
     soundEnabled: true,
     tasks: [],
     citations: [],
+    citationStyle: 'apa7',
+    ach: null,
+    village: null,
     notes: [],
     mood: { date: '', value: '' },
     pomodoro: {
@@ -28,42 +54,40 @@
       sessionsToday: [], // {taskId, seconds, completedAt}
       streakDays: 0,
       lastActiveDate: '',
-      // "Toleransi deret harian": tiap 1 minggu dapet jatah 2 hari bolong
-      // yang gak bikin deret balik ke nol. Gak akumulasi antar minggu —
-      // jatahnya di-refill ke 2 (bukan ditambah), jadi maksimal 2 kapan pun.
       streakToleranceLeft: 2,
-      streakToleranceAnchor: '', // tanggal mulai jendela 7-harian saat ini
-      soundVolume: 0.6,          // 0..1 — scales the chime's gain
-      soundPreset: 'ting-lembut', // key into SOUND_PRESETS
+      streakToleranceAnchor: '',
+      soundVolume: 0.6,
+      soundPreset: 'ting-lembut',
     },
-    // Pengingat jam belajar & deadline — dibikin buat ramah otak ADHD:
-    // tiap slot cuma nembak sekali (dicatat di reminderLog), dan
-    // kalimatnya dirandom dari beberapa variasi biar gak gampang jadi
-    // "wallpaper" yang otomatis di-skip begitu udah hafal bunyinya.
+    focusSettings: {
+      blockEnabled: false,
+      blockMode: 'preset', // 'preset' | 'custom'
+      customSites: [],     // array of SOCIAL_SITES ids
+      locked: false,       // "kunci pengaturan selagi Mode Fokus aktif"
+    },
+    focusScratch: '',
     reminders: {
       studyEnabled: false,
-      studyTimes: [],              // ["HH:MM", ...]
+      studyTimes: [],
       idleNudgeEnabled: true,
       idleNudgeMinutes: 45,
       deadlineEnabled: true,
-      deadlineLeadDays: [3, 1, 0], // H- berapa hari sebelum deadline
+      deadlineLeadDays: [3, 1, 0],
       overdueEnabled: true,
     },
     reminderLog: {
       date: '',
-      studyFiredTimes: [],   // ["HH:MM", ...] yang udah nembak hari ini
+      studyFiredTimes: [],
       idleLastFireAt: 0,
-      deadlineFired: [],     // ["<taskId>:<leadDay>", ...]
-      overdueFired: [],      // ["<taskId>:<YYYY-MM-DD>", ...] (format lama Windows, tidak dipakai lagi)
-      // Android: waktu (ms) tiap pengingat dijadwalkan, supaya yang sudah lewat tidak ditembakkan dua kali.
-      deadlineAt: {},        // "<taskId>:<hariH>:<tenggat>" -> ms
-      overdueAt: {},         // "<taskId>:<YYYY-MM-DD>"     -> ms
+      deadlineFired: [],
+      overdueFired: [],
+      deadlineAt: {},
+      overdueAt: {},
     },
-    brainDump: '',
-    timerRun: null,      // Android: keadaan timer Pomodoro, supaya bertahan saat app ditutup
-    navPad: 0,           // Android: jarak cadangan (dp) di atas tombol navigasi HP
-    notifAsked: false,   // sudah pernah minta izin notifikasi?
-    exactAsked: false,   // sudah pernah menawarkan izin 'Alarm & pengingat'?
+    timerRun: null,      // keadaan timer Pomodoro, supaya bertahan saat app ditutup
+    navPad: 0,           // jarak cadangan (dp) di atas tombol navigasi HP
+    notifAsked: false,
+    exactAsked: false,
   });
 
   let state = DEFAULT_STATE();
@@ -122,11 +146,10 @@
     if (loaded) {
       state = Object.assign(DEFAULT_STATE(), loaded, {
         pomodoro: Object.assign(DEFAULT_STATE().pomodoro, loaded.pomodoro || {}),
+        focusSettings: Object.assign(DEFAULT_STATE().focusSettings, loaded.focusSettings || {}),
         reminders: Object.assign(DEFAULT_STATE().reminders, loaded.reminders || {}),
         reminderLog: Object.assign(DEFAULT_STATE().reminderLog, loaded.reminderLog || {}),
       });
-      // Pengguna lama yang dulu sudah menyetujui versi "EULA" tidak perlu
-      // disuruh setuju ulang karena namanya diganti jadi Syarat & Ketentuan.
       if (loaded.termsAccepted === undefined && loaded.eulaAccepted) {
         state.termsAccepted = true;
         state.termsVersion = 'EULA-lama';
@@ -134,9 +157,7 @@
       }
       migrateOldPomodoroShape(loaded);
       migrateOldCicilanIntoTasks(loaded);
-      // Nama field lama dari saat fitur ini masih bagian dari "Mode Fokus"
-      // yang sekarang udah dilebur ke kartu Pomodoro.
-      if (!loaded.brainDump && loaded.focusScratch) state.brainDump = loaded.focusScratch;
+      migrateGeneralTaskTypes();
     }
 
     rolloverDailyThings();
@@ -145,8 +166,12 @@
     initHome();
     initTasks();
     initPomodoro();
-    initDonate();
     initCitations();
+    initEdDoc();
+    initAchievements();
+    initDesa();
+    initDonate();
+    initFocus();
     initNotes();
     initSettings();
     initSoundSettings();
@@ -334,7 +359,15 @@
     delete state.cicilan;
   }
 
-  // Selisih hari kalender antara dua tanggal 'YYYY-MM-DD' (b - a).
+    // Jenis tugas lama (praktikum/makalah/tugas biasa) -> jenis umum, supaya tugas yang sudah ada tetap tampil rapi.
+  function migrateGeneralTaskTypes() {
+    (state.tasks || []).forEach(t => {
+      if (OLD_TASK_TYPE[t.type]) t.type = OLD_TASK_TYPE[t.type];
+      else if (!TASK_TYPE_LABEL[t.type]) t.type = 'lainnya';
+    });
+  }
+
+// Selisih hari kalender antara dua tanggal 'YYYY-MM-DD' (b - a).
   function daysBetween(a, b) {
     return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
   }
@@ -397,26 +430,21 @@
     renderTasks();
     renderPomodoroPanel();
     renderCitations();
+    renderFocusTaskOptions();
     renderNotes();
+    applyFocusLockUI();
   }
 
   // ============================================================
   // NAVIGATION
+  //  - HP     : tab bar bawah; Village/Pustaka/Pencapaian/Catatan/Pengaturan ada di menu "Lainnya"
+  //  - tablet : sidebar kiri persis seperti aplikasi desktop
   // ============================================================
-  // Dua tata letak, satu kode:
-  //  - sempit (HP)    : tab bar bawah; Catatan/Panduan/Pengaturan ada di menu "Lainnya"
-  //  - lebar (tablet) : sidebar kiri seperti aplikasi Windows; semua layar langsung di sidebar
-  // Aturan yang sama dipakai CSS (lihat styles.css, bagian "LAYAR LEBAR").
-  const wideMQ = window.matchMedia
-    ? window.matchMedia('(min-width: 1000px), (min-width: 600px) and (min-height: 500px)')
-    : { matches: false, addEventListener() {} };
-  function isWide() { return !!wideMQ.matches; }
-
   const TAB_OF = {
-    beranda: 'beranda', tugas: 'tugas', pomodoro: 'pomodoro', sitasi: 'sitasi',
-    lainnya: 'lainnya', catatan: 'lainnya', panduan: 'lainnya', pengaturan: 'lainnya',
+    beranda: 'beranda', tugas: 'tugas', pomodoro: 'pomodoro', fokus: 'pomodoro', eddoc: 'eddoc',
+    lainnya: 'lainnya', sitasi: 'lainnya', pencapaian: 'lainnya', desa: 'lainnya', catatan: 'lainnya', pengaturan: 'lainnya',
   };
-  const SUBVIEWS = new Set(['catatan', 'panduan', 'pengaturan']);
+  const SUBVIEWS = new Set(['sitasi', 'pencapaian', 'desa', 'catatan', 'pengaturan']);
   let currentView = 'beranda';
 
   function initNav() {
@@ -426,26 +454,104 @@
     document.querySelectorAll('[data-goto]').forEach(btn => {
       btn.addEventListener('click', () => goToView(btn.dataset.goto));
     });
-    // HP diputar / tablet berpindah mode jendela: pasang ulang tampilan yang sesuai
-    wideMQ.addEventListener('change', () => {
-      goToView(currentView);
-      renderTasks();
-    });
+    let resizeT = null;
+    const onResize = () => {
+      clearTimeout(resizeT);
+      resizeT = setTimeout(() => {
+        if (applyLayoutMode()) { goToView(currentView); renderTasks(); }
+      }, 150);
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
     goToView('beranda');
   }
 
   function goToView(name) {
     if (!TAB_OF[name]) name = 'beranda';
-    if (name === 'lainnya' && isWide()) name = 'beranda'; // di layar lebar tidak ada menu "Lainnya"
+    if (name === 'lainnya' && isWide()) name = 'beranda'; // di tablet tidak ada menu "Lainnya"
     currentView = name;
     const tab = TAB_OF[name];
     document.querySelectorAll('.tab-item[data-view]').forEach(b => b.classList.toggle('is-active', b.dataset.view === tab));
-    document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.toggle('is-active', b.dataset.view === name));
+    document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.toggle('is-active', b.dataset.view === name || (name === 'fokus' && b.dataset.view === 'pomodoro')));
     document.querySelectorAll('.view').forEach(v => v.classList.toggle('is-active', v.id === `view-${name}`));
     document.body.dataset.view = name;
     const content = document.getElementById('content');
-    if (content) content.scrollTop = 0;
+    if (content && name !== 'fokus') content.scrollTop = 0;
+    updateFocusShell();
+    syncDocOpenClass();
     if (name === 'pengaturan') refreshNotifStatus();
+  }
+
+  // Padding .content untuk dokumen terbuka (pengganti :has() yang tidak ada di WebView lama).
+  function syncDocOpenClass() {
+    const v = document.getElementById('view-eddoc'), c = document.getElementById('content');
+    if (!v || !c) return;
+    c.classList.toggle('eddoc-doc-open', v.classList.contains('is-active') && v.classList.contains('has-doc'));
+  }
+
+  // ------------------------------------------------------------
+  // MODE FOKUS = SESI LAYAR PENUH (status bar & tombol navigasi disembunyikan, layar tetap menyala).
+  // Keluar (tombol Selesai / tombol kembali) = sesi berakhir dan timer dijeda.
+  // ------------------------------------------------------------
+  let focusFullscreen = false;  // lagi layar penuh
+  let focusMode = false;        // sesi Mode Fokus lagi aktif
+  const isFocusViewActive = () => document.getElementById('view-fokus').classList.contains('is-active');
+  function updateFocusShell() {
+    const sh = document.querySelector('.shell');
+    if (sh) {
+      sh.classList.toggle('is-focus-session', focusMode);
+      sh.classList.toggle('is-focus-full', focusMode && isFocusViewActive());
+    }
+    const hud = document.getElementById('focusHud');
+    if (hud) hud.hidden = !(focusMode && !isFocusViewActive());
+  }
+  async function enterFocusMode(taskId) {
+    if (taskId) {
+      timer.linkedTaskId = taskId;
+      const cfg = document.getElementById('cfgLinkedTask'); if (cfg) cfg.value = taskId;
+    }
+    document.getElementById('focusTaskSelect').value = timer.linkedTaskId || '';
+    focusMode = true;
+    goToView('fokus');
+    try { await window.api.setFullScreen(true); } catch (e) { onFullScreenChange(true); }
+  }
+  function endFocusMode() {
+    if (!focusMode) return;
+    const wasRunning = timer.running;
+    if (wasRunning) toggleTimer();            // jeda timer
+    stopFocusBlockingIfNeeded();
+    focusMode = false;
+    desa('focusEnded');                       // sisa sesi dihitung sebagai pomodoro biasa (koin setengah)
+    if (focusFullscreen) { focusFullscreen = false; window.api.setFullScreen(false); }
+    if (isFocusViewActive()) goToView('pomodoro'); else updateFocusShell();
+    if (wasRunning) appToast('Keluar dari Mode Fokus, jadi timernya dijeda ⏸️ Lanjut kapan pun kamu siap.');
+  }
+  function onFullScreenChange(isFull) {
+    focusFullscreen = !!isFull;
+    if (!focusFullscreen && focusMode) endFocusMode(); else updateFocusShell();
+  }
+  function requestExitFocus() {
+    if (focusFullscreen) window.api.setFullScreen(false); // event layar penuh yang melanjutkan
+    else endFocusMode();
+  }
+
+  // Toast kecil buat info singkat (dipakai pencapaian & Mode Fokus)
+  let appToastTimer = null;
+  function appToast(lines, onClick) {
+    let t = document.getElementById('appToast');
+    if (!t) {
+      t = document.createElement('div'); t.id = 'appToast'; t.className = 'app-toast';
+      t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite');
+      document.body.appendChild(t);
+    }
+    const arr = Array.isArray(lines) ? lines : [lines];
+    t.textContent = '';
+    arr.forEach((ln) => { const p = document.createElement('p'); p.textContent = ln; t.appendChild(p); });
+    t.classList.toggle('is-click', !!onClick);
+    t.onclick = onClick ? () => { t.classList.remove('is-show'); onClick(); } : null;
+    t.classList.add('is-show');
+    clearTimeout(appToastTimer);
+    appToastTimer = setTimeout(() => t.classList.remove('is-show'), 5200);
   }
 
   // ============================================================
@@ -464,35 +570,31 @@
 
     const hour = new Date().getHours();
     const greetWord = hour < 11 ? 'Pagi' : hour < 15 ? 'Siang' : hour < 18 ? 'Sore' : 'Malam';
-    const name = (state.userName || '').trim();
-    document.getElementById('greeting').textContent = name
-      ? `Selamat ${greetWord.toLowerCase()}, ${name}!`
-      : `Selamat ${greetWord.toLowerCase()}!`;
+    const uname = (state.userName || '').trim();
+    document.getElementById('greeting').textContent = uname ? `Met ${greetWord.toLowerCase()}, ${uname}! ✨` : `Met ${greetWord.toLowerCase()}! ✨`;
     document.getElementById('todayLine').textContent = new Date().toLocaleDateString('id-ID', {
       weekday: 'long', day: 'numeric', month: 'long',
     });
   }
 
   const MOOD_NOTES = {
-    lelah: 'Pelan-pelan saja. Kamu tidak harus menyelesaikan semuanya hari ini; satu langkah kecil sudah cukup.',
-    biasa: 'Tidak apa-apa. Melangkah pelan-pelan tetap akan sampai.',
-    semangat: 'Momen yang pas untuk memulai sesi fokus. Manfaatkan semangatmu.',
-    cemas: 'Tarik napas dulu. Coba satu sesi Pomodoro singkat untuk membantu meredakan pikiran yang ramai.',
+    lelah: 'Chill dulu, gak harus rampung semua hari ini. Satu langkah kecil aja udah menang.',
+    biasa: 'Nice, tetep gas pelan-pelan juga sampai kok.',
+    semangat: 'Gaskeun! Ini momen yang pas buat mulai sesi fokus, jangan disia-siain.',
+    cemas: 'Tarik napas dulu bestie. Coba Mode Fokus biar distraksi pada minggir.',
   };
 
   function renderHome() {
     const active = state.tasks.filter(t => t.status !== 'selesai');
     document.getElementById('statActiveTasks').textContent = active.length;
-    ['navTugasBadge', 'navTugasBadgeSide'].forEach(id => { document.getElementById(id).textContent = active.length || ''; });
+    renderHomeHero();
+    ['navTugasBadge', 'navTugasBadgeTab'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = active.length || ''; });
 
     const sessions = state.pomodoro.sessionsToday;
     document.getElementById('statSessionsToday').textContent = sessions.length;
     const totalSec = sessions.reduce((a, s) => a + (s.seconds || 0), 0);
     document.getElementById('statMinutesToday').textContent = `${Math.round(totalSec / 60)} menit`;
     document.getElementById('statStreak').textContent = state.pomodoro.streakDays;
-    const tol = state.pomodoro.streakToleranceLeft;
-    document.getElementById('statStreakFoot').textContent =
-      `hari berturut-turut · 🛡️ ${tol} streak`;
 
     const list = document.getElementById('homeTaskList');
     const sorted = [...active].sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).slice(0, 5);
@@ -508,43 +610,31 @@
     document.getElementById('moodNote').textContent = state.mood.value ? MOOD_NOTES[state.mood.value] : '';
   }
 
+  // Kartu "Mulai fokus" di Beranda HP: mengikuti keadaan timer.
+  function renderHomeHero() {
+    const t = document.getElementById('hhTime');
+    if (!t) return;
+    t.textContent = fmtMMSS(timer.remaining);
+    const started = timer.remaining < timer.total;
+    document.getElementById('hhMode').textContent = timer.running ? MODE_LABELS[timer.mode] + ' · berjalan' : (started ? MODE_LABELS[timer.mode] + ' · dijeda' : 'Siap fokus?');
+    const n = state.pomodoro.sessionsToday.length, active = state.tasks.filter(x => x.status !== 'selesai').length;
+    document.getElementById('hhSub').textContent = n + ' sesi hari ini · ' + active + ' tugas aktif';
+    document.getElementById('hhBtn').textContent = timer.running ? 'Lihat timer' : (started ? 'Lanjut' : 'Mulai fokus');
+  }
+
   // ============================================================
   // TASKS
   // ============================================================
   let currentFilter = 'semua';
-  let showDone = false;      // layar lebar: tampilkan kolom "Selesai"
-  let statusTab = 'belum';   // layar sempit: tab status yang sedang dibuka
+  let showDone = false;
+  let statusTab = 'belum';   // HP: tab status yang sedang dibuka
   let editingTaskId = null;
   let subtaskDraft = [];
   let expandedTaskIds = new Set();
 
-  const TASK_TYPE_LABEL = { praktikum: 'Praktikum', makalah: 'Makalah', tugas: 'Tugas biasa', lainnya: 'Lainnya' };
-
-  // Contoh langkah siap pakai (opsional) di formulir tugas — dulu ini isi
-  // fitur "Cicil Duluan" yang terpisah, sekarang jadi bagian dari Tugas aja
-  // supaya kerja mecah-tugas-jadi-langkah-kecil gak perlu dua tempat beda.
-  const TASK_STEP_TEMPLATES = {
-    praktikum: [
-      'Baca ulang modul atau petunjuk praktikum',
-      'Tulis tujuan dan latar belakang singkat',
-      'Kumpulkan 3 referensi (jurnal atau buku) untuk landasan teori',
-      'Tulis landasan teori',
-      'Rapikan alat, bahan, dan prosedur kerja',
-      'Siapkan tabel kosong untuk data hasil',
-      'Tulis kerangka pembahasan (poin-poinnya dulu)',
-      'Rapikan format dan daftar pustaka',
-    ],
-    makalah: [
-      'Tentukan topik dan rumusan masalah',
-      'Cari 5 sumber referensi',
-      'Susun kerangka (judul bab dan poin-poinnya)',
-      'Tulis pendahuluan',
-      'Tulis isi bagian 1',
-      'Tulis isi bagian 2',
-      'Tulis kesimpulan',
-      'Rapikan format dan daftar pustaka',
-    ],
-  };
+  const TASK_TYPE_LABEL = { kerja: 'Kerja', belajar: 'Belajar', pribadi: 'Pribadi', lainnya: 'Lainnya' };
+  // Jenis tugas versi lama (waktu aplikasi ini masih khusus kuliah) dipetakan ke jenis yang umum.
+  const OLD_TASK_TYPE = { praktikum: 'belajar', makalah: 'belajar', tugas: 'lainnya' };
 
   function initTasks() {
     document.querySelectorAll('.chip[data-filter]').forEach(chip => {
@@ -556,28 +646,17 @@
     });
     document.getElementById('chipShowDone').addEventListener('click', (e) => {
       showDone = !showDone;
-      e.currentTarget.classList.toggle('is-active', showDone);
+      e.target.classList.toggle('is-active', showDone);
       renderTasks();
     });
+
+    ['btnAddTask', 'btnFab'].forEach(id => { const el = document.getElementById(id); if (el) el.addEventListener('click', () => openTaskModal()); });
     document.querySelectorAll('#taskSeg .seg-btn').forEach(b => {
       b.addEventListener('click', () => { statusTab = b.dataset.status; renderTasks(); });
     });
-
-    ['btnAddTask', 'btnAddTaskWide'].forEach(id => document.getElementById(id).addEventListener('click', () => openTaskModal()));
     document.getElementById('btnCancelTask').addEventListener('click', closeTaskModal);
     document.getElementById('btnSaveTask').addEventListener('click', saveTaskFromModal);
     document.getElementById('btnAddSubtask').addEventListener('click', () => addSubtaskRow(''));
-    document.getElementById('taskStepTemplate').addEventListener('change', (e) => {
-      const steps = TASK_STEP_TEMPLATES[e.target.value];
-      e.target.value = ''; // reset biar bisa dipilih ulang kapan aja
-      if (!steps) return;
-      // Baris kosong yang masih kosong (misal baris awal bawaan modal)
-      // dibuang dulu biar contoh langkahnya gak nyampur sama baris kosong.
-      document.querySelectorAll('#subtaskEditor .subtask-row').forEach(row => {
-        if (!row.querySelector('.subtask-text').value.trim()) row.remove();
-      });
-      steps.forEach(text => addSubtaskRow(text));
-    });
     document.getElementById('taskModalOverlay').addEventListener('click', (e) => {
       if (e.target.id === 'taskModalOverlay') closeTaskModal();
     });
@@ -606,7 +685,7 @@
     editingTaskId = task ? task.id : null;
     document.getElementById('taskModalTitle').textContent = task ? 'Edit tugas' : 'Tugas baru';
     document.getElementById('taskTitle').value = task ? task.title : '';
-    document.getElementById('taskType').value = task ? task.type : 'praktikum';
+    document.getElementById('taskType').value = task ? task.type : 'belajar';
     document.getElementById('taskCourse').value = task ? task.course : '';
     document.getElementById('taskDue').value = task ? task.due : '';
     document.getElementById('taskPriority').value = task ? task.priority : 'normal';
@@ -614,7 +693,7 @@
     subtaskDraft = task ? task.subtasks.map(s => ({ ...s })) : [];
     const editor = document.getElementById('subtaskEditor');
     editor.innerHTML = '';
-    subtaskDraft.forEach((s) => addSubtaskRow(s.text, s.due));
+    subtaskDraft.forEach((s) => addSubtaskRow(s.text));
     if (subtaskDraft.length === 0) addSubtaskRow('');
 
     const bulkInput = document.getElementById('subtaskBulkInput');
@@ -637,17 +716,13 @@
   // insertAfterRow: when given, the new row lands right below it (so hitting
   // Enter mid-list drops the next step where you're looking, not at the
   // bottom). Omit it to just append — used for initial population/bulk-paste.
-  // due (opsional): tanggal "YYYY-MM-DD" tenggat khusus langkah ini, kalau
-  // pengguna mau. Kosong = gak ada tenggat, dan itu wajar — bukan tiap
-  // langkah kecil butuh deadline sendiri.
-  function addSubtaskRow(text, due, insertAfterRow) {
+  function addSubtaskRow(text, insertAfterRow) {
     const editor = document.getElementById('subtaskEditor');
     const row = document.createElement('div');
     row.className = 'subtask-row';
-    row.innerHTML = `<input type="text" class="subtask-text" value="${escapeHtml(text)}" placeholder="Langkah kecil…" />
-                      <input type="date" class="subtask-due" value="${due || ''}" title="Tenggat langkah ini (opsional)" />
-                      <button type="button" title="Hapus langkah">✕</button>`;
-    const input = row.querySelector('.subtask-text');
+    row.innerHTML = `<input type="text" value="${escapeHtml(text)}" placeholder="Langkah kecil…" />
+                      <button type="button" title="Hapus">✕</button>`;
+    const input = row.querySelector('input');
     row.querySelector('button').addEventListener('click', () => row.remove());
 
     // Enter = "tambahin langkah baru", biar nggak perlu bolak-balik klik
@@ -655,8 +730,8 @@
     input.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      const newRow = addSubtaskRow('', '', row);
-      newRow.querySelector('.subtask-text').focus();
+      const newRow = addSubtaskRow('', row);
+      newRow.querySelector('input').focus();
     });
 
     if (insertAfterRow && insertAfterRow.parentElement === editor) {
@@ -676,19 +751,15 @@
     const title = document.getElementById('taskTitle').value.trim();
     if (!title) { document.getElementById('taskTitle').focus(); return; }
 
-    const subtaskRows = [...document.querySelectorAll('#subtaskEditor .subtask-row')]
-      .map(row => ({
-        text: row.querySelector('.subtask-text').value.trim(),
-        due: row.querySelector('.subtask-due').value || '',
-      }))
-      .filter(r => r.text);
+    const subtasksText = [...document.querySelectorAll('#subtaskEditor input')]
+      .map(i => i.value.trim()).filter(Boolean);
 
     const existing = editingTaskId ? state.tasks.find(t => t.id === editingTaskId) : null;
     const prevSubtasks = existing ? existing.subtasks : [];
 
-    const subtasks = subtaskRows.map(r => {
-      const match = prevSubtasks.find(s => s.text === r.text);
-      return { id: match ? match.id : uid(), text: r.text, done: match ? match.done : false, due: r.due };
+    const subtasks = subtasksText.map(text => {
+      const match = prevSubtasks.find(s => s.text === text);
+      return { id: match ? match.id : uid(), text, done: match ? match.done : false };
     });
 
     const payload = {
@@ -703,21 +774,21 @@
     if (existing) {
       Object.assign(existing, payload);
     } else {
-      state.tasks.push({
-        id: uid(), status: 'belum', createdAt: Date.now(), ...payload,
-      });
+      const newTask = { id: uid(), status: 'belum', createdAt: Date.now(), ...payload };
+      state.tasks.push(newTask);
       statusTab = 'belum';
+      recordAch('task_created', { id: newTask.id });
     }
     persist();
     closeTaskModal();
-    renderTasks(); renderHome(); renderPomodoroLinkedOptions();
+    renderTasks(); renderHome(); renderFocusTaskOptions(); renderPomodoroLinkedOptions();
   }
 
   const SEG_COUNT_ID = { belum: 'segCountBelum', berjalan: 'segCountBerjalan', selesai: 'segCountSelesai' };
   const EMPTY_TASK_HINT = {
-    belum: 'Tidak ada tugas yang menunggu. Tekan tombol + untuk menambah.',
-    berjalan: 'Belum ada tugas yang sedang dikerjakan. Tekan “Mulai” pada salah satu tugas.',
-    selesai: 'Belum ada tugas yang selesai.',
+    belum: 'Gak ada tugas yang nunggu. Tekan tombol + buat nambah satu 🌿',
+    berjalan: 'Belum ada tugas yang lagi jalan. Tekan “Gas” di salah satu tugas.',
+    selesai: 'Belum ada tugas yang kelar.',
   };
 
   function renderTasks() {
@@ -727,11 +798,11 @@
     const byDue = (a, b) => (a.due || '9999').localeCompare(b.due || '9999');
 
     if (isWide()) {
-      // Layar lebar (tablet): papan 3 kolom seperti di Windows; kolom "Selesai" lewat chip.
+      // Tablet: papan 3 kolom seperti di desktop; kolom "Kelar" lewat chip.
       [
         { key: 'belum', label: 'Belum dikerjakan' },
-        { key: 'berjalan', label: 'Sedang dikerjakan' },
-        { key: 'selesai', label: 'Selesai' },
+        { key: 'berjalan', label: 'Sedang jalan' },
+        { key: 'selesai', label: 'Kelar' },
       ].forEach(col => {
         if (col.key === 'selesai' && !showDone) return;
         const wrap = document.createElement('div');
@@ -745,7 +816,7 @@
       return;
     }
 
-    // Layar sempit (HP): satu daftar per tab status.
+    // HP: satu daftar per tab status.
     Object.keys(SEG_COUNT_ID).forEach(k => {
       const el = document.getElementById(SEG_COUNT_ID[k]);
       if (el) el.textContent = state.tasks.filter(t => t.status === k && passFilter(t)).length;
@@ -786,7 +857,7 @@
       ${total ? `
       <button class="subtask-toggle" data-act="toggle-subtasks" type="button">
         <span class="subtask-caret">${isOpen ? '▾' : '▸'}</span>
-        <span class="subtask-progress">${done}/${total} langkah selesai</span>
+        <span class="subtask-progress">${done}/${total} langkah kelar</span>
       </button>
       <div class="subtask-mini-bar"><div class="subtask-mini-fill" style="width:${Math.round((done/total)*100)}%"></div></div>
       <ul class="subtask-checklist" ${isOpen ? '' : 'hidden'}>
@@ -795,13 +866,12 @@
             <label>
               <input type="checkbox" data-subtask-id="${s.id}" ${s.done ? 'checked' : ''} />
               <span>${escapeHtml(s.text)}</span>
-              ${s.due ? `<span class="due">🗓 ${fmtDue(s.due)}</span>` : ''}
             </label>
           </li>`).join('')}
       </ul>` : ''}
       <div class="task-actions">
-        ${t.status === 'belum' ? '<button class="btn-ghost" data-act="mulai">Mulai</button>' : ''}
-        ${t.status === 'berjalan' ? '<button class="btn-ghost" data-act="fokus">Fokus</button>' : ''}
+        ${t.status === 'belum' ? '<button class="btn-ghost" data-act="mulai">Gas</button>' : ''}
+        ${t.status === 'berjalan' ? '<button class="btn-ghost" data-act="fokus">Fokusin</button>' : ''}
         ${t.status !== 'selesai' ? '<button class="btn-ghost" data-act="pecah">Pecah</button>' : ''}
         <button class="btn-ghost" data-act="edit">Edit</button>
         <button class="btn-ghost" data-act="hapus">Hapus</button>
@@ -812,9 +882,10 @@
       const justCompleted = t.status !== 'selesai';
       t.status = t.status === 'selesai' ? 'berjalan' : 'selesai';
       persist(); renderTasks(); renderHome();
-      // Cuma pas beneran baru diselesain (bukan pas di-uncheck lagi) yang
-      // dapet pesan pujian.
       if (justCompleted && t.status === 'selesai') { showPraiseToast(t); window.api.tap(); }
+      if (t.status === 'selesai') {
+        recordAch('task_done', { id: t.id, ageMs: Date.now() - (t.createdAt || 0), subtasks: t.subtasks.length, subDone: t.subtasks.filter(x => x.done).length });
+      }
     });
     card.querySelectorAll('[data-act]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -822,12 +893,8 @@
         if (act === 'mulai') { t.status = 'berjalan'; persist(); renderTasks(); }
         if (act === 'edit') openTaskModal(t);
         if (act === 'pecah') openTaskModal(t, true);
-        if (act === 'hapus') { state.tasks = state.tasks.filter(x => x.id !== t.id); persist(); renderTasks(); renderHome(); renderPomodoroLinkedOptions(); }
-        if (act === 'fokus') {
-          goToView('pomodoro');
-          timer.linkedTaskId = t.id;
-          document.getElementById('cfgLinkedTask').value = t.id;
-        }
+        if (act === 'hapus') { state.tasks = state.tasks.filter(x => x.id !== t.id); persist(); renderTasks(); renderHome(); renderFocusTaskOptions(); }
+        if (act === 'fokus') enterFocusMode(t.id);
         if (act === 'toggle-subtasks') {
           if (expandedTaskIds.has(t.id)) expandedTaskIds.delete(t.id); else expandedTaskIds.add(t.id);
           renderTasks();
@@ -841,6 +908,7 @@
         sub.done = cb.checked;
         persist();
         renderTasks();
+        if (sub.done) recordAch('subtask_done', { id: sub.id });
       });
     });
 
@@ -848,17 +916,18 @@
   }
 
   // ============================================================
-  // POMODORO ENGINE (shared by main view + mini widget)
-  // ============================================================
-  const MODE_LABELS = { work: 'Fokus', short: 'Istirahat Pendek', long: 'Istirahat Panjang' };
+  // POMODORO ENGINE (dipakai kartu Pomodoro, Mode Fokus, dan HUD)
   // Android: hitungan mundur memakai WAKTU AKHIR (endAt), bukan "kurangi 1 tiap detik".
   // Saat layar mati / app di latar belakang, JavaScript bisa dibekukan sistem; dengan
   // endAt sisa waktu tetap benar begitu app dibuka lagi, dan notifikasi terjadwal
   // yang membunyikan alarm-nya.
+  // ============================================================
+  const MODE_LABELS = { work: 'Fokus', short: 'Istirahat Kilat', long: 'Istirahat Santuy' };
   let timer = {
     mode: 'work', remaining: 25 * 60, total: 25 * 60, running: false,
     cycleCount: 0, linkedTaskId: '', interval: null, endAt: 0,
   };
+  const ID_TIMER_WORK = 9001, ID_TIMER_BREAK = 9002, ID_IDLE = 9100, ID_FOCUS_GUARD = 9200;
 
   function initPomodoro() {
     syncPomodoroInputsFromState();
@@ -883,20 +952,8 @@
     document.getElementById('btnStartPause').addEventListener('click', toggleTimer);
     document.getElementById('btnResetTimer').addEventListener('click', () => resetTimerToMode(timer.mode));
     document.getElementById('btnSkipTimer').addEventListener('click', skipTimer);
-
-    const brainDumpBtn = document.getElementById('btnToggleBrainDump');
-    const brainDumpWrap = document.getElementById('brainDumpWrap');
-    const brainDumpInput = document.getElementById('pomodoroBrainDump');
-    if (state.brainDump) brainDumpInput.value = state.brainDump;
-    brainDumpWrap.hidden = !state.brainDump; // kalau udah ada isinya sebelumnya, langsung kebuka
-    brainDumpBtn.addEventListener('click', () => {
-      brainDumpWrap.hidden = !brainDumpWrap.hidden;
-      if (!brainDumpWrap.hidden) brainDumpInput.focus();
-    });
-    brainDumpInput.addEventListener('input', (e) => {
-      state.brainDump = e.target.value;
-      persist();
-    });
+    const miniBtn = document.getElementById('btnOpenMiniWidget'); if (miniBtn) miniBtn.hidden = true; // widget mengambang cuma ada di desktop
+    document.getElementById('btnEnterFocusMode').addEventListener('click', () => (focusMode ? goToView('fokus') : enterFocusMode()));
 
     renderPomodoroLinkedOptions();
     restoreTimer();
@@ -937,9 +994,12 @@
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+  // Pengingat "balik fokus": di Android dikerjakan lewat notifikasi terjadwal saat app
+  // pindah ke latar belakang selagi sesi fokus berjalan (lihat onAppInactive).
+  function syncFocusGuard() { /* tidak ada yang perlu disinkronkan terus-menerus di HP */ }
+
   // ------------------------------------------------------------
-  // Sound cue: a little two-note "ting" whenever a segment ends
-  // (fokus -> istirahat, atau istirahat -> fokus lagi).
+  // Sound cue + pilihan suara alarm
   // ------------------------------------------------------------
   let audioCtx = null;
   function unlockAudio() {
@@ -1096,7 +1156,7 @@
   function renderPomodoroLinkedOptions() {
     const sel = document.getElementById('cfgLinkedTask');
     const cur = sel.value;
-    sel.innerHTML = '<option value="">Tidak dikaitkan</option>';
+    sel.innerHTML = '<option value="">Gak dikaitin</option>';
     state.tasks.filter(t => t.status !== 'selesai').forEach(t => {
       const opt = document.createElement('option');
       opt.value = t.id; opt.textContent = t.title;
@@ -1104,8 +1164,6 @@
     });
     sel.value = cur;
   }
-
-  const ID_TIMER_WORK = 9001, ID_TIMER_BREAK = 9002, ID_IDLE = 9100;
 
   function secForMode(mode) {
     return { work: state.pomodoro.workSec, short: state.pomodoro.shortSec, long: state.pomodoro.longSec }[mode];
@@ -1130,6 +1188,7 @@
     timer.mode = mode;
     timer.running = false;
     timer.endAt = 0;
+    desa('sessionCancel');
     timer.total = secForMode(mode);
     timer.remaining = timer.total;
     renderTimerUI();
@@ -1140,8 +1199,9 @@
     if (timer.running) {
       pauseTimer();
     } else {
-      // Starting a session counts as "sudah gerak" — reset the idle-nudge clock.
+      // Memulai sesi = "sudah gerak": reset jam dorongan lembut.
       state.reminderLog.idleLastFireAt = Date.now();
+      if (timer.mode === 'work') { if (timer.remaining === timer.total) desa('sessionStart', focusMode); else desa('sessionResume'); }
       startTimerRunning();
       ensureTimerPermissions();
     }
@@ -1152,6 +1212,7 @@
     timer.running = false;
     timer.endAt = 0;
     clearInterval(timer.interval);
+    desa('sessionPause');
     renderTimerUI();
     saveTimerRun();
   }
@@ -1190,15 +1251,17 @@
         completedAt: doneAt,
       });
       if (state.pomodoro.sessionsToday.length === 1) state.pomodoro.streakDays += 1;
+      desa('sessionFinish', state.pomodoro.workSec);
       timer.cycleCount += 1;
       persist();
       renderHome(); renderPomodoroPanel();
+      recordAch('session_done', { seconds: state.pomodoro.workSec, hour: new Date(doneAt).getHours(), fullscreen: focusMode && focusFullscreen });
       const nextMode = (timer.cycleCount % state.pomodoro.cycles === 0) ? 'long' : 'short';
       resetTimerToMode(nextMode);
-      // Sesi fokus abis -> lanjut istirahat otomatis, gak perlu klik Mulai lagi.
+      // Sesi fokus abis -> lanjut istirahat otomatis, gak perlu klik Gas lagi.
       startTimerRunning(doneAt);
     } else {
-      // Balik ke sesi fokus tetep manual (klik Mulai pas emang udah siap lagi).
+      // Balik ke sesi fokus tetep manual (klik Gas pas emang udah siap lagi).
       resetTimerToMode('work');
     }
   }
@@ -1247,17 +1310,33 @@
     const txt = fmtMMSS(timer.remaining);
     const timerTimeEl = document.getElementById('timerTime');
     const timerModeEl = document.getElementById('timerMode');
+    const focusTimeEl = document.getElementById('focusTime');
     if (timerTimeEl) timerTimeEl.textContent = txt;
     if (timerModeEl) timerModeEl.textContent = MODE_LABELS[timer.mode];
+    if (focusTimeEl) focusTimeEl.textContent = txt;
+    const focusModeEl = document.getElementById('focusModeLabel');
+    if (focusModeEl) focusModeEl.textContent = MODE_LABELS[timer.mode];
+    const fhTime = document.getElementById('fhTime');
+    if (fhTime) {
+      fhTime.textContent = txt;
+      document.getElementById('fhLabel').textContent = MODE_LABELS[timer.mode];
+      const tg = document.getElementById('fhToggle');
+      tg.textContent = timer.running ? '⏸' : '▶';
+      tg.setAttribute('aria-label', timer.running ? 'Jeda timer' : 'Lanjutkan timer');
+    }
 
     const ring = document.getElementById('ringProgress');
     if (ring) {
       const frac = timer.remaining / timer.total;
       ring.style.strokeDashoffset = String(RING_CIRC * (1 - frac));
     }
-    const label = timer.running ? 'Jeda' : (timer.remaining < timer.total ? 'Lanjut' : 'Mulai');
+    const label = timer.running ? 'Jeda' : (timer.remaining < timer.total ? 'Lanjut' : 'Gas');
     const btn = document.getElementById('btnStartPause');
     if (btn) btn.textContent = label;
+    const fbtn = document.getElementById('focusStartPause');
+    if (fbtn) fbtn.textContent = label;
+    desa('refreshLive');
+    renderHomeHero();
   }
 
   function renderPomodoroPanel() {
@@ -1274,63 +1353,173 @@
     document.getElementById('pomodoroHistoryEmpty').hidden = sessions.length > 0;
   }
 
+  // ============================================================
+  // FOCUS MODE (reuses the same timer engine) + site blocking
+  // ============================================================
+  // WhatsApp is intentionally never in this catalog — "blokir semua
+  // (kecuali WhatsApp)" is enforced simply by it never being offered here.
+  const SOCIAL_SITES = [
+    { id: 'instagram', label: 'Instagram', domains: ['instagram.com', 'www.instagram.com'] },
+    { id: 'tiktok', label: 'TikTok', domains: ['tiktok.com', 'www.tiktok.com'] },
+    { id: 'facebook', label: 'Facebook', domains: ['facebook.com', 'www.facebook.com', 'm.facebook.com'] },
+    { id: 'twitter', label: 'X / Twitter', domains: ['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'] },
+    { id: 'snapchat', label: 'Snapchat', domains: ['snapchat.com', 'www.snapchat.com'] },
+    { id: 'youtube', label: 'YouTube', domains: ['youtube.com', 'www.youtube.com', 'm.youtube.com'] },
+    { id: 'reddit', label: 'Reddit', domains: ['reddit.com', 'www.reddit.com'] },
+    { id: 'discord', label: 'Discord (web)', domains: ['discord.com', 'www.discord.com'] },
+  ];
 
-  // ============================================================
-  // POPUP DONASI — konfirmasi dulu sebelum ke link eksternal.
-  // Tombol "Lanjut" itu <a target="_blank"> biasa, jadi tetep
-  // dibuka di browser default lewat setWindowOpenHandler di main.js.
-  // ============================================================
-  function initDonate() {
-    const overlay = document.getElementById('donateModalOverlay');
-    const close = () => overlay.classList.remove('is-open');
-    document.querySelectorAll('[data-donate-open]').forEach(b => {
-      b.addEventListener('click', () => overlay.classList.add('is-open'));
+  const LOCK_PRAISES = [
+    '🔥 Gila sih, niat kamu buat komit emang beda level. Salut!',
+    '👏 Mantap banget! Ini baru namanya serius sama diri sendiri.',
+    '✨ Respect! Kamu baru aja upgrade diri jadi versi paling disiplin.',
+    '💪 Nice choice! Masa depan kamu bakal makasih banget soal ini.',
+  ];
+
+  let focusSessionActive = false; // true from first "Gas" until exit/reset
+
+  function initFocus() {
+    document.getElementById('focusStartPause').addEventListener('click', async () => {
+      const isFreshStart = !timer.running && timer.remaining === timer.total;
+      toggleTimer();
+      if (timer.running && isFreshStart) await startFocusBlockingIfNeeded();
     });
-    document.getElementById('btnDonateCancel').addEventListener('click', close);
-    document.getElementById('btnDonateGo').addEventListener('click', (e) => {
-      e.preventDefault();
-      window.api.openExternal(e.currentTarget.href);
-      setTimeout(close, 0);
+    document.getElementById('focusReset').addEventListener('click', async () => {
+      resetTimerToMode(timer.mode);
+      await stopFocusBlockingIfNeeded();
     });
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    document.getElementById('btnExitFocus').addEventListener('click', requestExitFocus);
+    document.getElementById('fhToggle').addEventListener('click', () => toggleTimer());
+    document.getElementById('fhBack').addEventListener('click', () => goToView('fokus'));
+    document.getElementById('fhExit').addEventListener('click', requestExitFocus);
+    if (window.api.onFullScreenChange) window.api.onFullScreenChange(onFullScreenChange);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isFocusViewActive()) { e.preventDefault(); requestExitFocus(); }
+    });
+    document.getElementById('focusTaskSelect').addEventListener('change', (e) => {
+      timer.linkedTaskId = e.target.value;
+      document.getElementById('cfgLinkedTask').value = e.target.value;
+    });
+    document.getElementById('focusBrainDump').addEventListener('input', (e) => {
+      state.focusScratch = e.target.value;
+      persist();
+    });
+    if (state.focusScratch) document.getElementById('focusBrainDump').value = state.focusScratch;
+  }
+
+  function renderFocusTaskOptions() {
+    const sel = document.getElementById('focusTaskSelect');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">Mau fokus ke tugas apa nih…</option>';
+    state.tasks.filter(t => t.status !== 'selesai').forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.id; opt.textContent = t.title;
+      sel.appendChild(opt);
+    });
+    sel.value = cur;
+  }
+
+  function getBlockDomains() {
+    const fset = state.focusSettings;
+    if (!fset.blockEnabled) return [];
+    const ids = fset.blockMode === 'preset' ? SOCIAL_SITES.map(s => s.id) : fset.customSites;
+    return SOCIAL_SITES.filter(s => ids.includes(s.id)).flatMap(s => s.domains);
+  }
+
+  function setFocusBlockStatus(text) {
+    const el = document.getElementById('focusBlockStatus');
+    if (!el) return;
+    el.hidden = !text;
+    el.textContent = text;
+  }
+
+  async function startFocusBlockingIfNeeded() {
+    focusSessionActive = true;
+    applyFocusLockUI();
+    const domains = getBlockDomains();
+    if (!domains.length) return;
+    try {
+      await window.api.blockSites(domains);
+      setFocusBlockStatus('🧠 Reminder nyala: jauhin dulu medsos-nya sampai sesi ini kelar. WhatsApp tetep aman kok.');
+    } catch (e) {
+      // purely a soft in-app reminder now — nothing to actually fail at.
+    }
+  }
+
+  async function stopFocusBlockingIfNeeded() {
+    if (!focusSessionActive) return;
+    focusSessionActive = false;
+    applyFocusLockUI();
+    setFocusBlockStatus('');
+    try { await window.api.unblockSites(); } catch (e) { /* best effort */ }
+  }
+
+  // Disables Focus-Mode-affecting controls while a locked session is live —
+  // the point is you can't quietly weaken your own commitment mid-sesi.
+  function applyFocusLockUI() {
+    const locked = state.focusSettings.locked && focusSessionActive;
+    const taskSelect = document.getElementById('focusTaskSelect');
+    if (taskSelect) taskSelect.disabled = locked;
+
+    ['cfgBlockEnabled', 'blockModePreset', 'blockModeCustom', 'focusLockNo', 'focusLockYes'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = locked;
+    });
+    document.querySelectorAll('#siteChecklist input').forEach(el => { el.disabled = locked; });
+
+    const note = document.getElementById('focusLockActiveNote');
+    if (note) note.hidden = !locked;
   }
 
   // ============================================================
-  // CITATIONS (APA 7th ed. / Harvard)
+  // DAFTAR PUSTAKA (APA 7 / MLA 9 / Chicago / IEEE / Vancouver)
+  // Data sumber disimpan mentah (authors, year, title, dst.). Teks daftar
+  // pustaka & kutipan in-text dihitung ulang tiap render sesuai gaya yang
+  // lagi dipilih, jadi ganti gaya = seluruh daftar langsung ikut berubah.
   // ============================================================
+  const CITE_STYLES = [
+    { id: 'apa7', label: 'APA 7th (nama–tahun)', numbered: false,
+      hint: 'Gaya bawaan dan paling umum dipakai (sistem Harvard/nama–tahun). Kutipan: (Nama Tahun). Daftar diurutkan abjad.' },
+    { id: 'mla9', label: 'MLA 9th', numbered: false,
+      hint: 'MLA pakai nama + halaman tanpa tahun: (Nama 12). Daftar diurutkan abjad.' },
+    { id: 'chicago', label: 'Chicago 17th (nama–tahun)', numbered: false,
+      hint: 'Chicago nama–tahun: (Nama Tahun, 12). Daftar diurutkan abjad.' },
+    { id: 'ieee', label: 'IEEE (bernomor)', numbered: true,
+      hint: 'IEEE pakai nomor: [1]. Daftar berurutan sesuai kapan kamu nambahin sumbernya.' },
+    { id: 'vancouver', label: 'Vancouver (bernomor)', numbered: true,
+      hint: 'Vancouver pakai nomor: (1). Daftar berurutan sesuai kapan kamu nambahin sumbernya.' },
+  ];
+
+  const CITE_TYPES = [
+    { id: 'buku', label: 'Buku' },
+    { id: 'jurnal', label: 'Artikel jurnal' },
+    { id: 'prosiding', label: 'Artikel prosiding/seminar' },
+    { id: 'skripsi', label: 'Skripsi/Tesis/Disertasi' },
+    { id: 'internet', label: 'Artikel internet' },
+  ];
+
   const CITE_EXTRA_FIELDS = {
     buku: [
-      { id: 'edition', label: 'Edisi/cetakan', ph: 'Edisi Pertama' },
+      { id: 'edition', label: 'Edisi/cetakan (opsional)', ph: 'Edisi Pertama' },
       { id: 'publisher', label: 'Penerbit', ph: 'Kanisius' },
       { id: 'city', label: 'Kota terbit', ph: 'Yogyakarta' },
     ],
-    terjemahan: [
-      // Kolom "Penulis"/"Tahun"/"Judul" di atas diisi versi TERJEMAHAN yang
-      // kamu pegang. Judul & tahun asli sifatnya cuma pemanis tambahan di
-      // akhir referensi, gampang dilewatin kalau emang gak tahu/gak ada.
-      { id: 'translator', label: 'Diterjemahkan oleh', ph: 'Ahmad Fauzi' },
-      { id: 'publisher', label: 'Penerbit (versi terjemahan)', ph: 'Gramedia Pustaka Utama' },
-      { id: 'city', label: 'Kota terbit', ph: 'Jakarta' },
-      { id: 'originalTitle', label: 'Judul asli', ph: 'Judul dalam bahasa aslinya' },
-      { id: 'originalYear', label: 'Tahun terbit asli', ph: '1988' },
-    ],
     jurnal: [
-      { id: 'journal', label: 'Nama jurnal', ph: 'Jurnal Ilmu Pendidikan' },
+      { id: 'journal', label: 'Nama jurnal', ph: 'Jurnal Ilmu Komputer' },
       { id: 'volume', label: 'Volume', ph: '10' },
-      { id: 'issue', label: 'Nomor', ph: '1' },
+      { id: 'issue', label: 'Nomor (opsional)', ph: '1' },
       { id: 'pages', label: 'Halaman', ph: '31-38' },
     ],
     prosiding: [
-      { id: 'proceeding', label: 'Nama prosiding/seminar', ph: 'Prosiding Seminar Nasional Penelitian' },
+      { id: 'proceeding', label: 'Nama prosiding/seminar', ph: 'Prosiding Seminar Nasional Teknologi' },
       { id: 'eventDate', label: 'Tanggal & bulan pelaksanaan', ph: '7 Juli 2011' },
-      { id: 'organizer', label: 'Penyelenggara', ph: 'Fakultas Ilmu Sosial, Universitas Contoh' },
+      { id: 'organizer', label: 'Penyelenggara (opsional)', ph: 'Fakultas Teknik Universitas Contoh' },
       { id: 'pages', label: 'Halaman', ph: '71-84' },
     ],
     skripsi: [
       { id: 'workType', label: 'Jenis karya', ph: '', type: 'select', options: ['Skripsi', 'Tesis', 'Disertasi'] },
-      { id: 'program', label: 'Program studi & perguruan tinggi', ph: 'Program Studi Manajemen, Universitas Contoh' },
-      { id: 'city', label: 'Kota', ph: 'Yogyakarta' },
+      { id: 'program', label: 'Program studi & institusi', ph: 'Fakultas Teknik, Universitas Contoh' },
+      { id: 'city', label: 'Kota', ph: 'Bandung' },
     ],
     internet: [
       { id: 'url', label: 'Alamat (URL)', ph: 'https://...' },
@@ -1338,15 +1527,28 @@
     ],
   };
 
+  function getCiteStyle() {
+    return CITE_STYLES.some(s => s.id === state.citationStyle) ? state.citationStyle : 'apa7';
+  }
+
   function initCitations() {
     const typeSel = document.getElementById('citeType');
     typeSel.addEventListener('change', renderCiteExtraFields);
     renderCiteExtraFields();
 
+    const styleSel = document.getElementById('citeStyleSelect');
+    styleSel.innerHTML = CITE_STYLES.map(s => `<option value="${s.id}">${s.label}</option>`).join('');
+    styleSel.value = getCiteStyle();
+    styleSel.addEventListener('change', () => {
+      state.citationStyle = styleSel.value;
+      persist();
+      renderCitations();
+    });
+
     document.getElementById('btnAddCitation').addEventListener('click', addCitation);
     document.getElementById('btnCopyAllCitations').addEventListener('click', () => {
-      const text = state.citations.map(c => c.reference).sort().join('\n\n');
-      copyText(text);
+      const text = citationEntries().map(e => e.reference).join('\n\n');
+      navigator.clipboard.writeText(text);
       flashButton('btnCopyAllCitations', 'Tersalin!');
     });
   }
@@ -1367,15 +1569,36 @@
     });
   }
 
+  // ---------- name helpers (input format: "Nama belakang, Inisial.") ----------
+  function parseAuthor(a) {
+    const i = a.indexOf(',');
+    return { last: (i < 0 ? a : a.slice(0, i)).trim(), ini: i < 0 ? '' : a.slice(i + 1).trim() };
+  }
+  function lastFirst(a) { const p = parseAuthor(a); return p.ini ? `${p.last}, ${p.ini}` : p.last; }
+  function initialsFirst(a) { const p = parseAuthor(a); return p.ini ? `${p.ini} ${p.last}` : p.last; }
+  function vancouverName(a) {
+    const p = parseAuthor(a);
+    const letters = p.ini.replace(/[^\p{L}]/gu, '');
+    return letters ? `${p.last} ${letters}` : p.last;
+  }
+  const cg = (f, k) => String(f[k] == null ? '' : f[k]).trim();
+  const joinParts = (parts, sep) => parts.filter(Boolean).join(sep == null ? ' ' : sep);
+  function endDot(s) { s = (s || '').trim(); return s && !/[.!?]$/.test(s) ? s + '.' : s; }
+  function quoted(s) { s = (s || '').trim().replace(/[.,]$/, ''); return s ? `"${s}."` : ''; }
+  function quotedComma(s) { s = (s || '').trim().replace(/[.,]$/, ''); return s ? `"${s},"` : ''; }
+  function cityPub(f) {
+    const city = cg(f, 'city'), pub = cg(f, 'publisher');
+    return pub ? (city ? `${city}: ${pub}` : pub) : city;
+  }
+
+  // ---------- APA 7 (Harvard / nama–tahun) — gaya bawaan ----------
   function formatAuthorsForReference(authors) {
-    if (!authors || !authors.length) return '';
-    if (authors.length === 1) return authors[0];
+    if (authors.length <= 1) return authors[0] || '';
     if (authors.length <= 6) return authors.slice(0, -1).join(', ') + ' dan ' + authors[authors.length - 1];
     return authors.join(', ');
   }
 
   function formatAuthorsForInText(authors) {
-    if (!authors || !authors.length) return '';
     const lastNames = authors.map(a => a.split(',')[0].trim());
     if (lastNames.length === 1) return lastNames[0];
     if (lastNames.length === 2) return `${lastNames[0]} dan ${lastNames[1]}`;
@@ -1383,67 +1606,212 @@
     return `${lastNames[0]} et al.`;
   }
 
-  // Kolom "Tahun" & "Penulis" sifatnya opsional, jadi in-text & referensi
-  // harus tetep masuk akal walau salah satu (atau semuanya) kosong — bukan
-  // nampilin "undefined" gitu aja.
-  function dot(s) { return s ? `${s}.` : ''; }
-  function joinNonEmpty(parts, sep = ' ') { return parts.filter(p => p && p.trim()).join(sep); }
-
-  function buildReference(type, f) {
-    const authorsRef = formatAuthorsForReference(f.authors);
-    const year = f.year || 't.t.'; // "tanpa tahun", gaya APA buat sumber tanpa tahun terbit
-    const parts = [dot(authorsRef), `(${year}).`, dot(f.title)];
-
+  function refApa7(type, f) {
+    // inisial penulis sudah berakhiran titik ("Fatisa, Y."), jangan dobel jadi "Y.."
+    const authorsRef = formatAuthorsForReference(f.authors).replace(/\.+$/, '');
     switch (type) {
       case 'buku':
-        parts.push(dot(f.edition), dot(f.publisher), dot(f.city));
-        break;
-      case 'terjemahan': {
-        if (f.translator) parts.push(`Diterjemahkan oleh ${f.translator}.`);
-        parts.push(dot(f.publisher), dot(f.city));
-        // Info karya asli ditaruh belakang sendiri, format umum dipakai
-        // buat buku terjemahan: "(Karya asli terbit tahun ...)".
-        if (f.originalTitle || f.originalYear) {
-          const bits = [];
-          if (f.originalTitle) bits.push(`judul asli: ${f.originalTitle}`);
-          if (f.originalYear) bits.push(`terbit tahun ${f.originalYear}`);
-          parts.push(`(Karya asli — ${bits.join(', ')}).`);
-        }
-        break;
-      }
-      case 'jurnal': {
-        let line = f.journal || '';
-        if (f.volume) line += (line ? ', ' : '') + f.volume + (f.issue ? `(${f.issue})` : '');
-        if (f.pages) line += (line ? ': ' : '') + f.pages;
-        parts.push(dot(line));
-        break;
-      }
+        return `${authorsRef}. (${f.year}). ${f.title}.${f.edition ? ' ' + f.edition + '.' : ''} ${f.publisher}. ${f.city}.`;
+      case 'jurnal':
+        return `${authorsRef}. (${f.year}). ${f.title}. ${f.journal}, ${f.volume}${f.issue ? '(' + f.issue + ')' : ''}: ${f.pages}.`;
       case 'prosiding':
-        parts.push(dot(f.proceeding), dot(f.eventDate), dot(f.organizer), dot(f.pages));
-        break;
+        return `${authorsRef}. (${f.year}). ${f.title}. ${f.proceeding}. ${f.eventDate}.${f.organizer ? ' ' + f.organizer + ':' : ''} ${f.pages}.`;
       case 'skripsi':
-        parts.push(dot(f.workType), dot(f.program), dot(f.city));
-        break;
+        return `${authorsRef}. (${f.year}). ${f.title}. ${f.workType}. ${f.program}. ${f.city}.`;
       case 'internet':
-        parts.push(dot(f.url), f.accessDate ? `Diakses ${f.accessDate}.` : '');
-        break;
+        return `${authorsRef}. (${f.year}). ${f.title}. ${f.url}. Diakses ${f.accessDate}.`;
       default:
-        break;
+        return `${authorsRef}. (${f.year}). ${f.title}.`;
     }
-    return joinNonEmpty(parts) || 'Sumber baru (belum ada keterangan diisi)';
   }
 
-  function buildInText(f) {
-    const author = formatAuthorsForInText(f.authors);
-    const year = f.year || 't.t.';
-    if (author) return `(${author} ${year})`;
-    if (f.title) {
-      // Gak ada nama penulis: pakai judul singkat sebagai gantinya, gaya
-      // Harvard/APA umum buat sumber tanpa penulis jelas.
-      const shortTitle = f.title.length > 40 ? f.title.slice(0, 40).trim() + '…' : f.title;
-      return `("${shortTitle}" ${year})`;
+  // ---------- MLA 9 ----------
+  function mlaAuthors(a) {
+    if (a.length <= 1) return a[0] ? lastFirst(a[0]) : '';
+    if (a.length === 2) return `${lastFirst(a[0])}, and ${initialsFirst(a[1])}`;
+    return `${lastFirst(a[0])}, et al.`;
+  }
+  function refMla9(type, f) {
+    const au = endDot(mlaAuthors(f.authors));
+    const y = cg(f, 'year');
+    switch (type) {
+      case 'buku':
+        return joinParts([au, endDot(f.title), endDot(joinParts([cg(f, 'edition'), cg(f, 'publisher'), y], ', '))]);
+      case 'jurnal': {
+        const vol = cg(f, 'volume') ? `vol. ${cg(f, 'volume')}` : '';
+        const no = cg(f, 'issue') ? `no. ${cg(f, 'issue')}` : '';
+        const pp = cg(f, 'pages') ? `pp. ${cg(f, 'pages')}` : '';
+        return joinParts([au, quoted(f.title), endDot(joinParts([cg(f, 'journal'), vol, no, y, pp], ', '))]);
+      }
+      case 'prosiding': {
+        const pp = cg(f, 'pages') ? `pp. ${cg(f, 'pages')}` : '';
+        return joinParts([au, quoted(f.title), endDot(joinParts([cg(f, 'proceeding'), cg(f, 'organizer'), cg(f, 'eventDate') || y, pp], ', '))]);
+      }
+      case 'skripsi':
+        return joinParts([au, endDot(f.title), endDot(y), endDot(joinParts([cg(f, 'program'), cg(f, 'city'), cg(f, 'workType')], ', '))]);
+      case 'internet':
+        return joinParts([au, quoted(f.title), endDot(joinParts([y, cg(f, 'url')], ', ')), cg(f, 'accessDate') ? `Accessed ${cg(f, 'accessDate')}.` : '']);
+      default:
+        return joinParts([au, quoted(f.title), endDot(y)]);
     }
-    return `(${year})`;
+  }
+
+  // ---------- Chicago 17 (nama–tahun) ----------
+  function chicagoAuthors(a) {
+    if (a.length <= 1) return a[0] ? lastFirst(a[0]) : '';
+    const shown = a.length > 10 ? a.slice(0, 7) : a;
+    const names = shown.map((x, i) => (i === 0 ? lastFirst(x) : initialsFirst(x)));
+    if (a.length > 10) return names.join(', ') + ', et al.';
+    return names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1];
+  }
+  function refChicago(type, f) {
+    const au = endDot(chicagoAuthors(f.authors));
+    const y = endDot(cg(f, 'year'));
+    switch (type) {
+      case 'buku':
+        return joinParts([au, y, endDot(f.title), endDot(cg(f, 'edition')), endDot(cityPub(f))]);
+      case 'jurnal': {
+        const vi = cg(f, 'volume') + (cg(f, 'issue') ? ` (${cg(f, 'issue')})` : '');
+        const tail = joinParts([cg(f, 'journal'), vi], ' ') + (cg(f, 'pages') ? `: ${cg(f, 'pages')}` : '');
+        return joinParts([au, y, quoted(f.title), endDot(tail)]);
+      }
+      case 'prosiding': {
+        const inPart = `In ${cg(f, 'proceeding')}` + (cg(f, 'pages') ? `, ${cg(f, 'pages')}` : '');
+        return joinParts([au, y, quoted(f.title), endDot(inPart), endDot(joinParts([cg(f, 'organizer'), cg(f, 'eventDate')], ', '))]);
+      }
+      case 'skripsi':
+        return joinParts([au, y, quoted(f.title), endDot(joinParts([cg(f, 'workType'), cg(f, 'program'), cg(f, 'city')], ', '))]);
+      case 'internet':
+        return joinParts([au, y, quoted(f.title), cg(f, 'accessDate') ? `Accessed ${cg(f, 'accessDate')}.` : '', endDot(cg(f, 'url'))]);
+      default:
+        return joinParts([au, y, quoted(f.title)]);
+    }
+  }
+
+  // ---------- IEEE ----------
+  function ieeeAuthors(a) {
+    const n = a.map(initialsFirst);
+    if (n.length <= 1) return n[0] || '';
+    if (n.length === 2) return `${n[0]} and ${n[1]}`;
+    if (n.length <= 6) return n.slice(0, -1).join(', ') + ', and ' + n[n.length - 1];
+    return `${n[0]} et al.`;
+  }
+  function refIeee(type, f) {
+    const au = ieeeAuthors(f.authors);
+    const y = cg(f, 'year');
+    switch (type) {
+      case 'buku': {
+        const cp = cityPub(f);
+        return `${au}, ${cg(f, 'title')}${cg(f, 'edition') ? ', ' + cg(f, 'edition') : ''}. ${cp ? cp + ', ' : ''}${y}.`;
+      }
+      case 'jurnal': {
+        const vol = cg(f, 'volume') ? `vol. ${cg(f, 'volume')}` : '';
+        const no = cg(f, 'issue') ? `no. ${cg(f, 'issue')}` : '';
+        const pp = cg(f, 'pages') ? `pp. ${cg(f, 'pages')}` : '';
+        return `${au}, ${quotedComma(f.title)} ${joinParts([cg(f, 'journal'), vol, no, pp, y], ', ')}.`;
+      }
+      case 'prosiding': {
+        const pp = cg(f, 'pages') ? `pp. ${cg(f, 'pages')}` : '';
+        return `${au}, ${quotedComma(f.title)} in ${joinParts([cg(f, 'proceeding'), cg(f, 'organizer'), cg(f, 'eventDate') || y, pp], ', ')}.`;
+      }
+      case 'skripsi':
+        return `${au}, ${quotedComma(f.title)} ${joinParts([cg(f, 'workType'), cg(f, 'program'), cg(f, 'city'), y], ', ')}.`;
+      case 'internet':
+        return `${au}, ${quotedComma(f.title)} ${y}. [Online]. Available: ${cg(f, 'url')}${cg(f, 'accessDate') ? `. [Accessed: ${cg(f, 'accessDate')}]` : ''}.`;
+      default:
+        return `${au}, ${quotedComma(f.title)} ${y}.`;
+    }
+  }
+
+  // ---------- Vancouver ----------
+  function vancouverAuthors(a) {
+    const n = a.map(vancouverName);
+    return n.length > 6 ? n.slice(0, 6).join(', ') + ', et al.' : n.join(', ');
+  }
+  function refVancouver(type, f) {
+    const au = endDot(vancouverAuthors(f.authors));
+    const y = cg(f, 'year');
+    switch (type) {
+      case 'buku': {
+        const city = cg(f, 'city'), pub = cg(f, 'publisher');
+        const place = pub ? (city ? `${city}: ${pub}` : pub) : city;
+        return joinParts([au, endDot(f.title), endDot(cg(f, 'edition')), `${place ? place + '; ' : ''}${y}.`]);
+      }
+      case 'jurnal': {
+        const vi = cg(f, 'volume') + (cg(f, 'issue') ? `(${cg(f, 'issue')})` : '');
+        return joinParts([au, endDot(f.title), endDot(cg(f, 'journal')), `${y};${vi}${cg(f, 'pages') ? ':' + cg(f, 'pages') : ''}.`]);
+      }
+      case 'prosiding':
+        return joinParts([au, endDot(f.title), `In: ${joinParts([cg(f, 'proceeding'), cg(f, 'eventDate') || y, cg(f, 'organizer')], '; ')}.`, cg(f, 'pages') ? `p. ${cg(f, 'pages')}.` : '']);
+      case 'skripsi': {
+        const city = cg(f, 'city');
+        return joinParts([au, `${cg(f, 'title').replace(/[.]$/, '')} [${cg(f, 'workType') || 'Skripsi'}].`, `${city ? city + ': ' : ''}${cg(f, 'program')}; ${y}.`]);
+      }
+      case 'internet':
+        return joinParts([au, `${cg(f, 'title').replace(/[.]$/, '')} [Internet].`, `${y}${cg(f, 'accessDate') ? ` [cited ${cg(f, 'accessDate')}]` : ''}.`, cg(f, 'url') ? `Available from: ${cg(f, 'url')}` : '']);
+      default:
+        return joinParts([au, endDot(f.title), `${y}.`]);
+    }
+  }
+
+  function buildReference(style, type, f, num) {
+    switch (style) {
+      case 'mla9': return refMla9(type, f);
+      case 'chicago': return refChicago(type, f);
+      case 'ieee': return `[${num}] ${refIeee(type, f)}`;
+      case 'vancouver': return `${num}. ${refVancouver(type, f)}`;
+      default: return refApa7(type, f);
+    }
+  }
+
+  // ---------- kutipan in-text ----------
+  // page (opsional) diisi dari EdDOC kalau kutipannya diambil dari halaman PDF tertentu (dokumen non-PDF nggak punya halaman).
+  function buildInText(style, f, num, page) {
+    const lastNames = f.authors.map(a => parseAuthor(a).last);
+    const pg = page ? String(page) : '';
+    switch (style) {
+      case 'mla9': {
+        const au = lastNames.length === 1 ? lastNames[0]
+          : lastNames.length === 2 ? `${lastNames[0]} and ${lastNames[1]}` : `${lastNames[0]} et al.`;
+        return `(${au}${pg ? ' ' + pg : ''})`;
+      }
+      case 'chicago': {
+        const au = lastNames.length === 1 ? lastNames[0]
+          : lastNames.length === 2 ? `${lastNames[0]} and ${lastNames[1]}`
+          : lastNames.length === 3 ? `${lastNames[0]}, ${lastNames[1]}, and ${lastNames[2]}` : `${lastNames[0]} et al.`;
+        return `(${au} ${f.year}${pg ? ', ' + pg : ''})`;
+      }
+      case 'ieee': return `[${num}${pg ? ', p. ' + pg : ''}]`;
+      case 'vancouver': return `(${num}${pg ? ', p. ' + pg : ''})`;
+      default: return `(${formatAuthorsForInText(f.authors)} ${f.year}${pg ? ', hlm. ' + pg : ''})`;
+    }
+  }
+
+  // Daftar terurut sesuai gaya: bernomor -> urutan ditambahkan; lainnya -> abjad.
+  function citationEntries() {
+    const style = getCiteStyle();
+    const meta = CITE_STYLES.find(s => s.id === style);
+    const withIdx = state.citations.map((c, i) => ({ c, i }));
+    if (meta.numbered) {
+      withIdx.sort((a, b) => ((a.c.addedAt || 0) - (b.c.addedAt || 0)) || (a.i - b.i));
+    } else {
+      const key = (c) => (c.fields.authors || []).map(lastFirst).join(' ').toLowerCase() + ' ' + (c.fields.year || '');
+      withIdx.sort((a, b) => key(a.c).localeCompare(key(b.c)) || (a.i - b.i));
+    }
+    return withIdx.map(({ c }, idx) => {
+      const num = idx + 1;
+      return {
+        c, num,
+        reference: buildReference(style, c.type, c.fields, num),
+        inText: buildInText(style, c.fields, num, null),
+      };
+    });
+  }
+
+  function inTextForCitation(id, page) {
+    const style = getCiteStyle();
+    const entry = citationEntries().find(e => e.c.id === id);
+    return entry ? buildInText(style, entry.c.fields, entry.num, page) : '';
   }
 
   function addCitation() {
@@ -1451,6 +1819,7 @@
     const authors = document.getElementById('citeAuthors').value.split('\n').map(s => s.trim()).filter(Boolean);
     const year = document.getElementById('citeYear').value.trim();
     const title = document.getElementById('citeTitle').value.trim();
+    if (!authors.length || !year || !title) return;
 
     const extra = {};
     (CITE_EXTRA_FIELDS[type] || []).forEach(f => {
@@ -1458,23 +1827,12 @@
       if (el) extra[f.id] = el.value.trim();
     });
 
-    // Semua kolom di form ini OPSIONAL — isi aja yang kamu punya. Satu-satunya
-    // yang dicegah adalah klik "Tambah" pas semua kolom bener-bener kosong,
-    // karena gak ada apa pun buat disimpan. Kalau ini kena, kasih tau lewat
-    // tombolnya sendiri (bukan diem-diem gak ngapa-ngapain kayak sebelumnya).
-    const hasAnyValue = authors.length || year || title || Object.values(extra).some(Boolean);
-    if (!hasAnyValue) {
-      flashButton('btnAddCitation', 'Isi salah satu kolom dulu');
-      return;
-    }
-
     const fields = { authors, year, title, ...extra };
-    const reference = buildReference(type, fields);
-    const inText = buildInText(fields);
-
-    state.citations.push({ id: uid(), type, fields, reference, inText });
+    const newCite = { id: uid(), type, fields, addedAt: Date.now() };
+    state.citations.push(newCite);
     persist();
     renderCitations();
+    recordAch('citation_added', { id: newCite.id });
 
     document.getElementById('citeAuthors').value = '';
     document.getElementById('citeYear').value = '';
@@ -1485,23 +1843,89 @@
   function renderCitations() {
     const list = document.getElementById('citationList');
     list.innerHTML = '';
-    const sorted = [...state.citations].sort((a, b) => a.reference.localeCompare(b.reference));
-    sorted.forEach(c => {
+    const entries = citationEntries();
+    const meta = CITE_STYLES.find(s => s.id === getCiteStyle());
+    const hint = document.getElementById('citeStyleHint');
+    if (hint) hint.textContent = meta.hint;
+    entries.forEach(({ c, reference, inText }) => {
       const li = document.createElement('li');
       li.className = 'citation-item';
-      li.innerHTML = `<button class="del" data-id="${c.id}" title="Hapus">✕</button>${escapeHtml(c.reference)}<span class="in-text">${escapeHtml(c.inText)}</span>`;
+      li.innerHTML = `<button class="del" data-id="${c.id}" title="Hapus" aria-label="Hapus sumber ini">✕</button>${escapeHtml(reference)}<span class="in-text">${escapeHtml(inText)}</span>`;
       li.addEventListener('click', (e) => {
         if (e.target.classList.contains('del')) return;
-        copyText(c.inText);
-        showToast('Kutipan dalam teks disalin', { emoji: '📋' });
+        navigator.clipboard.writeText(inText);
       });
       li.querySelector('.del').addEventListener('click', () => {
         state.citations = state.citations.filter(x => x.id !== c.id);
         persist(); renderCitations();
+        if (window.EdDOC && window.EdDOC.onCitationRemoved) window.EdDOC.onCitationRemoved(c.id);
       });
       list.appendChild(li);
     });
-    document.getElementById('citationEmpty').hidden = sorted.length > 0;
+    document.getElementById('citationEmpty').hidden = entries.length > 0;
+  }
+
+
+  // ============================================================
+  // JEMBATAN KE EdDOC (eddoc.js) — EdDOC cuma lewat sini buat nyentuh
+  // state, Daftar Pustaka, dan navigasi.
+  // ============================================================
+  function initEdDoc() {
+    if (!window.EdDOC) return;
+    window.EdDOC.init({
+      getState: () => state,
+      persist,
+      uid,
+      goToView,
+      citeTypes: CITE_TYPES,
+      citeExtraFields: CITE_EXTRA_FIELDS,
+      // Tambah sumber ke Daftar Pustaka, atau perbarui kalau id-nya sudah ada.
+      upsertCitation(id, type, fields) {
+        const existing = id && state.citations.find(c => c.id === id);
+        if (existing) {
+          existing.type = type;
+          existing.fields = fields;
+        } else {
+          id = uid();
+          state.citations.push({ id, type, fields, addedAt: Date.now(), from: 'eddoc' });
+          recordAch('citation_added', { id });
+        }
+        persist();
+        renderCitations();
+        return id;
+      },
+      inText: (id, page) => inTextForCitation(id, page),
+      ach: (type, meta) => recordAch(type, meta),
+    });
+  }
+
+  // ============================================================
+  // PENCAPAIAN (achievements.js) — dicatat lewat recordAch, aman kalau modulnya belum ada
+  // ============================================================
+  function recordAch(type, meta) {
+    try { if (window.Achievements) window.Achievements.record(type, meta || {}); } catch (e) { /* jangan sampai ganggu fitur utama */ }
+  }
+  function initAchievements() {
+    if (!window.Achievements) return;
+    window.Achievements.init({
+      getState: () => state,
+      persist,
+      goToView,
+      toast: appToast,
+    });
+  }
+
+  // ============================================================
+  // DESA (desa.js) — koin dari sesi fokus yang dijalani tanpa keluar dari Readlify
+  // ============================================================
+  // DESA (desa.js) — koin dari sesi fokus yang dijalani tanpa keluar dari Readlify
+  // ============================================================
+  function desa(fn, ...args) {
+    try { if (window.Desa && window.Desa[fn]) return window.Desa[fn](...args); } catch (e) { /* jangan sampai ganggu timer */ }
+  }
+  function initDesa() {
+    if (!window.Desa) return;
+    window.Desa.init({ getState: () => state, persist, goToView, toast: appToast, ach: (type, meta) => recordAch(type, meta) });
   }
 
   function flashButton(id, text) {
@@ -1512,42 +1936,368 @@
   }
 
   // ============================================================
-  // NOTES (quick brain-dump)
+  // DUKUNG READLIFY: popup dulu, baru buka halaman donasi di browser
   // ============================================================
-  function initNotes() {
-    const input = document.getElementById('noteInput');
-    document.getElementById('btnAddNote').addEventListener('click', addNote);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addNote(); }
+  function initDonate() {
+    const ov = document.getElementById('donateOverlay');
+    if (!ov) return;
+    const goBtn = document.getElementById('donateGo'), laterBtn = document.getElementById('donateLater');
+    const hide = () => ov.classList.remove('is-open');
+    document.querySelectorAll('[data-donate-open]').forEach(b => b.addEventListener('click', () => ov.classList.add('is-open')));
+    laterBtn.addEventListener('click', hide);
+    goBtn.addEventListener('click', async () => {
+      hide();
+      if (window.api.openDonatePage) await window.api.openDonatePage();
     });
+    ov.addEventListener('click', (e) => { if (e.target === ov) hide(); });
   }
 
-  function addNote() {
-    const input = document.getElementById('noteInput');
-    const text = input.value.trim();
-    if (!text) return;
-    state.notes.unshift({ id: uid(), text, createdAt: Date.now() });
-    persist();
-    input.value = '';
-    renderNotes();
+  // ============================================================
+  // CATATAN (ala Google Keep: kartu berwarna, sematkan, daftar centang, cari, simpan .txt)
+  // ============================================================
+  const NOTE_COLORS = [
+    { id: 'default', label: 'Polos' },
+    { id: 'sage', label: 'Hijau sage' },
+    { id: 'honey', label: 'Madu' },
+    { id: 'clay', label: 'Tanah liat' },
+    { id: 'rose', label: 'Mawar' },
+    { id: 'lilac', label: 'Lilac' },
+    { id: 'sky', label: 'Langit' },
+  ];
+  let noteQuery = '';
+  let noteModalEl = null;     // jendela edit catatan yang sudah ada
+  let noteModalId = null;
+  let composerDraft = null;   // draft catatan baru (null = bar "Buat catatan…" tertutup)
+
+  function newNoteDraft(type) {
+    const now = Date.now();
+    return { id: uid(), type: type === 'list' ? 'list' : 'text', title: '', text: '', items: [], color: 'default', pinned: false, createdAt: now, updatedAt: now };
+  }
+  // Catatan lama (versi "Catatan Cepat") cuma punya {id, text, createdAt}; lengkapi field barunya.
+  function normalizeNote(n) {
+    if (!n.id) n.id = uid();
+    if (n.type !== 'list') n.type = 'text';
+    if (typeof n.title !== 'string') n.title = '';
+    if (typeof n.text !== 'string') n.text = '';
+    if (!Array.isArray(n.items)) n.items = [];
+    if (!NOTE_COLORS.some(c => c.id === n.color)) n.color = 'default';
+    n.pinned = !!n.pinned;
+    if (!n.createdAt) n.createdAt = Date.now();
+    if (!n.updatedAt) n.updatedAt = n.createdAt;
+    return n;
+  }
+  function pruneNote(n) {
+    n.title = n.title.trim();
+    n.items = n.items.filter(i => (i.text || '').trim());
+  }
+  const noteIsEmpty = (n) => !n.title.trim() && (n.type === 'list' ? !n.items.some(i => (i.text || '').trim()) : !n.text.trim());
+  const noteColorClass = (c) => 'nc-' + c;
+
+  // ---------- simpan sebagai .txt ----------
+  function noteToText(n) {
+    const lines = [];
+    if (n.title.trim()) lines.push(n.title.trim(), '');
+    if (n.type === 'list') {
+      n.items.filter(i => (i.text || '').trim()).forEach(i => lines.push(`[${i.done ? 'x' : ' '}] ${i.text.trim()}`));
+    } else {
+      lines.push(n.text.replace(/\s+$/, ''));
+    }
+    return lines.join('\n').replace(/\r?\n/g, '\r\n');
+  }
+  function noteFileName(n) {
+    const firstLine = n.type === 'list'
+      ? ((n.items.find(i => (i.text || '').trim()) || {}).text || '')
+      : (n.text.split(/\r?\n/).find(l => l.trim()) || '');
+    let base = (n.title.trim() || firstLine || 'Catatan')
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60).trim();
+    base = base.replace(/[. ]+$/, ''); // Windows nggak boleh nama file berakhir titik/spasi
+    return (base || 'Catatan') + '.txt';
+  }
+  function downloadText(filename, text) {
+    // Android: tulis ke berkas sementara lalu buka lembar "Bagikan / Simpan ke…".
+    window.api.exportBackup('﻿' + text, filename).then((r) => {
+      if (r === 'downloaded') appToast('Catatan tersimpan ke folder Unduhan.');
+    }).catch(() => appToast('Catatannya gagal disimpan. Coba lagi ya.'));
+  }
+  function downloadNote(n) {
+    if (noteIsEmpty(n)) { appToast('Catatannya masih kosong, belum ada yang bisa disimpan.'); return; }
+    downloadText(noteFileName(n), noteToText(n));
+  }
+  function sortedNotes(list) {
+    return [...list].sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || ((b.updatedAt || 0) - (a.updatedAt || 0)));
+  }
+  function exportAllNotes() {
+    const list = sortedNotes(state.notes.filter(n => !noteIsEmpty(n)));
+    if (!list.length) { appToast('Belum ada catatan yang bisa disimpan.'); return; }
+    const sep = '\r\n\r\n' + '='.repeat(32) + '\r\n\r\n';
+    downloadText(`Catatan Readlify ${new Date().toLocaleDateString('sv-SE')}.txt`, list.map(noteToText).join(sep));
   }
 
-  function renderNotes() {
-    const list = document.getElementById('noteList');
-    list.innerHTML = '';
-    state.notes.forEach(n => {
-      const li = document.createElement('li');
-      const time = new Date(n.createdAt).toLocaleString('id-ID', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' });
-      li.innerHTML = `<span>${escapeHtml(n.text)}</span><span class="due">${time}</span>`;
-      li.style.cursor = 'pointer';
-      li.title = 'Klik untuk hapus';
-      li.addEventListener('click', () => {
-        state.notes = state.notes.filter(x => x.id !== n.id);
-        persist(); renderNotes();
+  // ---------- editor (dipakai bar "Buat catatan…" dan jendela edit) ----------
+  function autoGrow(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.5)) + 'px'; }
+
+  function buildNoteEditor(note, opts) {
+    const root = document.createElement('div');
+    root.className = 'note-editor ' + noteColorClass(note.color);
+    const changed = () => { note.updatedAt = Date.now(); if (opts.onChange) opts.onChange(note); };
+
+    // judul + sematan
+    const head = document.createElement('div'); head.className = 'ne-head';
+    const title = document.createElement('input');
+    title.type = 'text'; title.className = 'ne-title'; title.placeholder = 'Judul'; title.maxLength = 120; title.value = note.title;
+    title.addEventListener('input', () => { note.title = title.value; changed(); });
+    title.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.ctrlKey || e.metaKey) return;
+      e.preventDefault();
+      const first = body.querySelector('textarea, .ne-item-text, .ne-additem'); if (first) first.focus();
+    });
+    const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'ne-icon'; pin.textContent = '📌';
+    const paintPin = () => { pin.classList.toggle('is-on', note.pinned); pin.title = note.pinned ? 'Lepas sematan' : 'Sematkan di atas'; pin.setAttribute('aria-label', pin.title); pin.setAttribute('aria-pressed', String(note.pinned)); };
+    pin.addEventListener('click', () => { note.pinned = !note.pinned; paintPin(); changed(); });
+    paintPin();
+    head.append(title, pin);
+
+    // isi: teks biasa atau daftar centang
+    const body = document.createElement('div'); body.className = 'ne-body';
+    function itemRow(it) {
+      const li = document.createElement('li'); li.className = 'ne-item' + (it.done ? ' is-done' : '');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!it.done; cb.setAttribute('aria-label', 'Tandai selesai');
+      const tx = document.createElement('input'); tx.type = 'text'; tx.className = 'ne-item-text'; tx.value = it.text || ''; tx.placeholder = 'Item';
+      const rm = document.createElement('button'); rm.type = 'button'; rm.className = 'ne-item-rm'; rm.textContent = '✕'; rm.title = 'Hapus item'; rm.setAttribute('aria-label', 'Hapus item');
+      cb.addEventListener('change', () => { it.done = cb.checked; li.classList.toggle('is-done', it.done); changed(); });
+      tx.addEventListener('input', () => { it.text = tx.value; changed(); });
+      tx.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+          e.preventDefault();
+          const nxt = { id: uid(), text: '', done: false };
+          note.items.splice(note.items.indexOf(it) + 1, 0, nxt);
+          const row = itemRow(nxt); li.after(row); row.querySelector('.ne-item-text').focus(); changed();
+        } else if (e.key === 'Backspace' && !tx.value) {
+          e.preventDefault();
+          const prev = li.previousElementSibling;
+          note.items = note.items.filter(x => x !== it); li.remove(); changed();
+          const pt = prev && prev.querySelector('.ne-item-text'); if (pt) pt.focus();
+        }
       });
-      list.appendChild(li);
+      rm.addEventListener('click', () => { note.items = note.items.filter(x => x !== it); li.remove(); changed(); });
+      li.append(cb, tx, rm);
+      return li;
+    }
+    function renderBody() {
+      body.textContent = '';
+      if (note.type === 'list') {
+        const ul = document.createElement('ul'); ul.className = 'ne-items';
+        note.items.forEach(it => ul.appendChild(itemRow(it)));
+        const add = document.createElement('input'); add.type = 'text'; add.className = 'ne-additem'; add.placeholder = '+ Tambah item (Enter)';
+        add.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' || e.ctrlKey || e.metaKey) return;
+          e.preventDefault();
+          const v = add.value.trim(); if (!v) return;
+          const it = { id: uid(), text: v, done: false };
+          note.items.push(it); add.value = ''; ul.appendChild(itemRow(it)); changed();
+        });
+        body.append(ul, add);
+      } else {
+        const ta = document.createElement('textarea'); ta.className = 'ne-text'; ta.placeholder = 'Tulis catatan…'; ta.rows = 4; ta.value = note.text;
+        ta.addEventListener('input', () => { note.text = ta.value; autoGrow(ta); changed(); });
+        body.appendChild(ta);
+        requestAnimationFrame(() => autoGrow(ta));
+      }
+    }
+
+    // bar bawah: warna, jenis, simpan .txt, hapus, selesai
+    const bar = document.createElement('div'); bar.className = 'ne-bar';
+    const colors = document.createElement('div'); colors.className = 'ne-colors'; colors.setAttribute('role', 'group'); colors.setAttribute('aria-label', 'Warna catatan');
+    const swatches = NOTE_COLORS.map((c) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'ne-swatch ' + noteColorClass(c.id);
+      b.title = c.label; b.setAttribute('aria-label', 'Warna ' + c.label);
+      b.addEventListener('click', () => { note.color = c.id; root.className = 'note-editor ' + noteColorClass(c.id); paintSwatches(); changed(); });
+      colors.appendChild(b); return { b, id: c.id };
     });
-    document.getElementById('noteEmpty').hidden = state.notes.length > 0;
+    const paintSwatches = () => swatches.forEach(s => { s.b.classList.toggle('is-on', s.id === note.color); s.b.setAttribute('aria-pressed', String(s.id === note.color)); });
+    paintSwatches();
+
+    const typeBtn = document.createElement('button'); typeBtn.type = 'button'; typeBtn.className = 'ne-chip';
+    const paintType = () => { typeBtn.textContent = note.type === 'list' ? '📝 Jadikan teks' : '☑ Jadikan daftar centang'; };
+    typeBtn.addEventListener('click', () => {
+      if (note.type === 'text') {
+        note.items = note.text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(t => ({ id: uid(), text: t, done: false }));
+        note.text = ''; note.type = 'list';
+      } else {
+        note.text = note.items.map(i => i.text).filter(t => (t || '').trim()).join('\n');
+        note.items = []; note.type = 'text';
+      }
+      paintType(); renderBody(); changed();
+      const f = body.querySelector('textarea, .ne-additem'); if (f) f.focus();
+    });
+    paintType();
+
+    const dl = document.createElement('button'); dl.type = 'button'; dl.className = 'ne-chip'; dl.textContent = '💾 Simpan .txt'; dl.title = 'Simpan catatan ini jadi file .txt';
+    dl.addEventListener('click', () => downloadNote(note));
+
+    const spacer = document.createElement('span'); spacer.className = 'ne-spacer';
+    bar.append(colors, typeBtn, dl);
+    if (opts.onDelete) {
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'ne-chip ne-chip-danger'; del.textContent = '🗑 Hapus';
+      del.addEventListener('click', opts.onDelete); bar.appendChild(del);
+    }
+    const done = document.createElement('button'); done.type = 'button'; done.className = 'btn-primary'; done.textContent = opts.isNew ? 'Simpan' : 'Selesai';
+    done.addEventListener('click', opts.onDone);
+    bar.append(spacer, done);
+
+    renderBody();
+    root.append(head, body, bar);
+    return {
+      el: root,
+      focus() { const f = note.type === 'list' ? title : body.querySelector('textarea'); (f || title).focus(); },
+    };
+  }
+
+  // ---------- bar "Buat catatan…" ----------
+  function renderComposer() {
+    const host = document.getElementById('noteComposer');
+    if (!host) return;
+    host.textContent = '';
+    if (!composerDraft) {
+      host.classList.remove('is-open');
+      const row = document.createElement('div'); row.className = 'nc-collapsed';
+      const ph = document.createElement('button'); ph.type = 'button'; ph.className = 'nc-placeholder'; ph.textContent = 'Buat catatan…';
+      ph.addEventListener('click', () => openComposer('text'));
+      const lst = document.createElement('button'); lst.type = 'button'; lst.className = 'ne-icon nc-list-btn'; lst.textContent = '☑'; lst.title = 'Buat daftar centang'; lst.setAttribute('aria-label', 'Buat daftar centang');
+      lst.addEventListener('click', () => openComposer('list'));
+      row.append(ph, lst); host.appendChild(row);
+      return;
+    }
+    host.classList.add('is-open');
+    const ed = buildNoteEditor(composerDraft, { isNew: true, onDone: closeComposer });
+    host.appendChild(ed.el);
+    ed.focus();
+  }
+  function openComposer(type) { composerDraft = newNoteDraft(type); renderComposer(); }
+  function closeComposer() {
+    const d = composerDraft; composerDraft = null;
+    if (d) {
+      pruneNote(d);
+      if (!noteIsEmpty(d)) {
+        d.updatedAt = Date.now();
+        state.notes.unshift(d);
+        persist();
+        recordAch('note_added', { id: 'qn_' + d.id });
+      }
+    }
+    renderComposer(); renderNotes();
+  }
+
+  // ---------- jendela edit ----------
+  function openNoteModal(id) {
+    const note = state.notes.find(n => n.id === id);
+    if (!note) return;
+    if (noteModalEl) closeNoteModal();
+    noteModalId = id;
+    const ov = document.createElement('div'); ov.className = 'note-modal'; ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', 'Edit catatan');
+    const card = document.createElement('div'); card.className = 'note-modal-card';
+    const ed = buildNoteEditor(note, {
+      isNew: false,
+      onChange: () => persist(),
+      onDone: () => closeNoteModal(),
+      onDelete: () => {
+        if (!confirm('Hapus catatan ini?')) return;
+        state.notes = state.notes.filter(x => x.id !== note.id);
+        noteModalId = null; closeNoteModal();
+      },
+    });
+    card.appendChild(ed.el); ov.appendChild(card); document.body.appendChild(ov);
+    ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeNoteModal(); });
+    noteModalEl = ov;
+    ed.focus();
+  }
+  function closeNoteModal() {
+    if (!noteModalEl) return;
+    const id = noteModalId;
+    noteModalEl.remove(); noteModalEl = null; noteModalId = null;
+    const n = state.notes.find(x => x.id === id);
+    if (n) { pruneNote(n); if (noteIsEmpty(n)) state.notes = state.notes.filter(x => x !== n); }
+    persist(); renderNotes();
+  }
+
+  // ---------- daftar kartu ----------
+  function noteMatches(n, q) {
+    if (!q) return true;
+    return [n.title, n.text, ...n.items.map(i => i.text)].join('\n').toLowerCase().includes(q);
+  }
+  function noteCard(n) {
+    const card = document.createElement('article');
+    card.className = 'note-card ' + noteColorClass(n.color);
+    card.tabIndex = 0; card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', 'Buka catatan' + (n.title ? ': ' + n.title : ''));
+
+    if (n.title) { const h = document.createElement('h3'); h.className = 'note-card-title'; h.textContent = n.title; card.appendChild(h); }
+    if (n.type === 'list') {
+      const items = n.items.filter(i => (i.text || '').trim());
+      const ul = document.createElement('ul'); ul.className = 'note-card-items';
+      items.slice(0, 8).forEach((i) => {
+        const li = document.createElement('li'); li.className = i.done ? 'is-done' : '';
+        li.textContent = (i.done ? '☑ ' : '☐ ') + i.text; ul.appendChild(li);
+      });
+      if (items.length > 8) { const more = document.createElement('li'); more.className = 'note-card-more'; more.textContent = `+${items.length - 8} item lagi`; ul.appendChild(more); }
+      card.appendChild(ul);
+    } else if (n.text.trim()) {
+      const p = document.createElement('div'); p.className = 'note-card-text'; p.textContent = n.text; card.appendChild(p);
+    }
+
+    const foot = document.createElement('div'); foot.className = 'note-card-foot';
+    const time = document.createElement('span'); time.className = 'note-card-time';
+    time.textContent = new Date(n.updatedAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+    const acts = document.createElement('div'); acts.className = 'note-card-actions';
+    const mk = (txt, label, fn, on) => {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'ne-icon' + (on ? ' is-on' : ''); b.textContent = txt; b.title = label; b.setAttribute('aria-label', label);
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      b.addEventListener('keydown', (e) => e.stopPropagation());
+      return b;
+    };
+    acts.append(
+      mk('📌', n.pinned ? 'Lepas sematan' : 'Sematkan di atas', () => { n.pinned = !n.pinned; persist(); renderNotes(); }, n.pinned),
+      mk('💾', 'Simpan jadi .txt', () => downloadNote(n)),
+      mk('🗑', 'Hapus catatan', () => { if (!confirm('Hapus catatan ini?')) return; state.notes = state.notes.filter(x => x.id !== n.id); persist(); renderNotes(); })
+    );
+    foot.append(time, acts); card.appendChild(foot);
+
+    card.addEventListener('click', () => openNoteModal(n.id));
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openNoteModal(n.id); } });
+    return card;
+  }
+  function renderNotes() {
+    const pinnedGrid = document.getElementById('notePinnedGrid');
+    if (!pinnedGrid) return;
+    const otherGrid = document.getElementById('noteOtherGrid');
+    state.notes.forEach(normalizeNote);
+    const q = noteQuery.trim().toLowerCase();
+    const list = sortedNotes(state.notes.filter(n => noteMatches(n, q)));
+    const pinned = list.filter(n => n.pinned), others = list.filter(n => !n.pinned);
+    pinnedGrid.textContent = ''; otherGrid.textContent = '';
+    pinned.forEach(n => pinnedGrid.appendChild(noteCard(n)));
+    others.forEach(n => otherGrid.appendChild(noteCard(n)));
+    document.getElementById('notePinnedWrap').hidden = pinned.length === 0;
+    document.getElementById('noteOtherLabel').hidden = pinned.length === 0 || others.length === 0;
+    const empty = document.getElementById('noteEmpty');
+    empty.hidden = list.length > 0;
+    empty.textContent = state.notes.length ? 'Nggak ada catatan yang cocok sama pencarianmu.' : 'Belum ada catatan. Ketuk “Buat catatan…” di atas buat mulai.';
+  }
+
+  function initNotes() {
+    state.notes.forEach(normalizeNote);
+    renderComposer();
+    const search = document.getElementById('noteSearch');
+    search.addEventListener('input', () => { noteQuery = search.value; renderNotes(); });
+    document.getElementById('btnNotesExportAll').addEventListener('click', exportAllNotes);
+    document.getElementById('noteComposer').addEventListener('keydown', (e) => {
+      if (!composerDraft) return;
+      if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); e.stopPropagation(); closeComposer(); }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (!noteModalEl) return;
+      if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); e.stopPropagation(); closeNoteModal(); }
+    }, true);
   }
 
   // ============================================================
@@ -1557,14 +2307,9 @@
     const nameInput = document.getElementById('cfgUserName');
     const nameStatus = document.getElementById('cfgUserNameStatus');
     syncProfileNameInput();
-
     document.getElementById('btnSaveUserName').addEventListener('click', () => {
       const name = nameInput.value.trim();
-      if (!name) {
-        nameInput.focus();
-        nameInput.classList.add('input-error');
-        return;
-      }
+      if (!name) { nameInput.focus(); nameInput.classList.add('input-error'); return; }
       nameInput.classList.remove('input-error');
       state.userName = name;
       persist();
@@ -1589,15 +2334,28 @@
       applyTheme();
     });
 
+    window.api.getVersion().then((v) => {
+      document.querySelectorAll('#appVersion').forEach(e => { if (v) e.textContent = 'v' + v; });
+      document.querySelectorAll('.app-ver').forEach(e => { if (v) e.textContent = v; });
+    }).catch(() => {});
+
+    window.api.deviceInfo().then((info) => {
+      const line = document.getElementById('deviceLine');
+      if (line) {
+        const bits = [info.manufacturer, info.model, info.osVersion ? 'Android ' + info.osVersion : '', info.webViewVersion ? 'WebView ' + info.webViewVersion : ''].filter(Boolean);
+        line.textContent = bits.join(' · ');
+        line.hidden = !bits.length;
+      }
+      const hw = document.getElementById('oemHuawei');
+      if (hw && info.isHuawei) hw.open = true;
+    }).catch(() => {});
+
     document.getElementById('btnResetData').addEventListener('click', () => {
-      if (!confirm('Hapus semua data (tugas, daftar pustaka, catatan)? Nama panggilanmu tetap disimpan. Tindakan ini tidak dapat dibatalkan.')) return;
+      if (!confirm('Hapus semua data (tugas, daftar pustaka, catatan, pencapaian, Village)? Nama panggilanmu tetap disimpan. Tindakan ini gak bisa dibatalin.')) return;
       const keepName = state.userName;
-      // Catatan persetujuan Syarat & Ketentuan sengaja dipertahankan.
       const keepTerms = {
-        termsAccepted: state.termsAccepted,
-        termsAcceptedAt: state.termsAcceptedAt,
-        termsVersion: state.termsVersion,
-        termsHistory: state.termsHistory,
+        termsAccepted: state.termsAccepted, termsAcceptedAt: state.termsAcceptedAt,
+        termsVersion: state.termsVersion, termsHistory: state.termsHistory,
       };
       state = DEFAULT_STATE();
       state.userName = keepName;
@@ -1605,11 +2363,77 @@
       clearTimeout(saveTimer);
       window.api.saveData(state).then(() => location.reload());
     });
+
+    initFocusSettings();
   }
 
   function syncProfileNameInput() {
     const nameInput = document.getElementById('cfgUserName');
     if (nameInput) nameInput.value = state.userName || '';
+  }
+
+  function initFocusSettings() {
+    const fset = state.focusSettings;
+
+    const blockEnabled = document.getElementById('cfgBlockEnabled');
+    blockEnabled.checked = fset.blockEnabled;
+    document.getElementById('blockModeGroup').hidden = !fset.blockEnabled;
+    blockEnabled.addEventListener('change', (e) => {
+      fset.blockEnabled = e.target.checked;
+      persist();
+      document.getElementById('blockModeGroup').hidden = !fset.blockEnabled;
+      syncFocusGuard();
+    });
+
+    document.getElementById('blockModePreset').checked = fset.blockMode === 'preset';
+    document.getElementById('blockModeCustom').checked = fset.blockMode === 'custom';
+    [['blockModePreset', 'preset'], ['blockModeCustom', 'custom']].forEach(([id, val]) => {
+      document.getElementById(id).addEventListener('change', () => {
+        if (!document.getElementById(id).checked) return;
+        fset.blockMode = val;
+        persist();
+        renderSiteChecklist();
+      });
+    });
+    renderSiteChecklist();
+
+    document.getElementById('focusLockNo').checked = !fset.locked;
+    document.getElementById('focusLockYes').checked = fset.locked;
+    document.getElementById('focusLockNo').addEventListener('change', () => {
+      if (!document.getElementById('focusLockNo').checked) return;
+      fset.locked = false;
+      persist();
+      document.getElementById('focusLockPraise').textContent = '';
+    });
+    document.getElementById('focusLockYes').addEventListener('change', () => {
+      if (!document.getElementById('focusLockYes').checked) return;
+      fset.locked = true;
+      persist();
+      document.getElementById('focusLockPraise').textContent = LOCK_PRAISES[Math.floor(Math.random() * LOCK_PRAISES.length)];
+    });
+
+    applyFocusLockUI();
+  }
+
+  function renderSiteChecklist() {
+    const wrap = document.getElementById('siteChecklist');
+    const show = state.focusSettings.blockMode === 'custom';
+    wrap.hidden = !show;
+    if (!show) return;
+    wrap.innerHTML = '';
+    SOCIAL_SITES.forEach(site => {
+      const row = document.createElement('label');
+      row.className = 'site-check';
+      const checked = state.focusSettings.customSites.includes(site.id);
+      row.innerHTML = `<input type="checkbox" ${checked ? 'checked' : ''} /> ${site.label}`;
+      row.querySelector('input').addEventListener('change', (e) => {
+        const set = new Set(state.focusSettings.customSites);
+        if (e.target.checked) set.add(site.id); else set.delete(site.id);
+        state.focusSettings.customSites = [...set];
+        persist();
+      });
+      wrap.appendChild(row);
+    });
   }
 
   function applyTheme() {
@@ -2060,8 +2884,12 @@
   }
 
   function showToast(text, opts = {}) {
-    const stack = document.getElementById('toastStack');
-    if (!stack) return;
+    let stack = document.getElementById('toastStack');
+    if (!stack) {
+      stack = document.createElement('div'); stack.id = 'toastStack'; stack.className = 'toast-stack';
+      stack.setAttribute('aria-live', 'polite');
+      document.body.appendChild(stack);
+    }
     const el = document.createElement('div');
     el.className = 'toast' + (opts.kind ? ` toast-${opts.kind}` : '');
     el.innerHTML = `${opts.emoji ? `<span class="toast-emoji">${opts.emoji}</span>` : ''}<span class="toast-text">${escapeHtml(text)}</span>`;
@@ -2115,18 +2943,31 @@
     window.api.notif.createChannels(channels);
   }
 
+  const FOCUS_GUARD_DELAY_MS = 25000;
+  const FOCUS_GUARD_MESSAGES = [
+    'Timer fokusmu masih jalan. Yuk balik ke Readlify 🌿',
+    'Lagi sesi fokus nih. Sebentar lagi kelar, lanjut yuk!',
+    'Kamu keluar dari Readlify pas sesi fokus. Balik pelan-pelan aja ya.',
+  ];
+
   function handleBack() {
-    const open = document.querySelector('.modal-overlay.is-open');
+    const opens = document.querySelectorAll('.modal-overlay.is-open');
+    const open = opens.length ? opens[opens.length - 1] : null;
     if (open) {
       if (open.id === 'taskModalOverlay') closeTaskModal();
-      else if (open.id === 'donateModalOverlay') open.classList.remove('is-open');
       else if (open.id === 'termsModalOverlay') {
         const closeBtn = document.getElementById('btnTermsClose');
-        if (closeBtn && !closeBtn.hidden) closeBtn.click(); // mode baca-saja; mode wajib-setuju tidak bisa ditutup
-      }
-      return true; // onboarding juga tidak bisa ditutup
+        if (closeBtn && !closeBtn.hidden) closeBtn.click(); // mode wajib-setuju tidak bisa ditutup
+      } else if (open.id === 'noteModalOverlay') closeNoteModal();
+      else if (open.id !== 'onboardingModalOverlay') open.classList.remove('is-open');
+      return true;
     }
-    if (SUBVIEWS.has(currentView)) { goToView('lainnya'); return true; }
+    if (window.EdDOC && window.EdDOC.back && window.EdDOC.back()) return true;
+    if (focusMode && isFocusViewActive()) {
+      if (confirm('Keluar dari Mode Fokus? Timernya akan dijeda.')) requestExitFocus();
+      return true;
+    }
+    if (SUBVIEWS.has(currentView) && !isWide()) { goToView('lainnya'); return true; }
     if (currentView !== 'beranda') { goToView('beranda'); return true; }
     return false; // di Beranda: aplikasi diminimalkan oleh bridge
   }
@@ -2136,7 +2977,7 @@
     initHome();
     if (timer.running) reconcileTimer();
     renderAll();
-    window.api.notif.cancel([ID_IDLE]);
+    window.api.notif.cancel([ID_IDLE, ID_FOCUS_GUARD]);
     syncTimerNotifications();
     syncReminders(false);
     unlockAudio();
@@ -2146,7 +2987,15 @@
   function onAppInactive() {
     flushSave();
     const n = window.api.notif;
-    if (!n.supported || timer.running) return;
+    if (!n.supported) return;
+    // "Balik fokus": sesi fokus berjalan lalu kamu pindah ke app lain.
+    if (timer.running && timer.mode === 'work' && state.focusSettings.blockEnabled && timer.endAt - Date.now() > FOCUS_GUARD_DELAY_MS + 5000) {
+      n.cancel([ID_FOCUS_GUARD]).then(() => n.schedule([{
+        id: ID_FOCUS_GUARD, title: 'Balik fokus yuk 🎯', body: pickRandom(FOCUS_GUARD_MESSAGES),
+        at: new Date(Date.now() + FOCUS_GUARD_DELAY_MS), channelId: 'pengingat', goto: 'pomodoro',
+      }]));
+    }
+    if (timer.running) return;
     // "Dorongan lembut": sekali saja setelah kamu meninggalkan app, kalau masih ada tugas dan timer tidak jalan.
     if (state.reminders.idleNudgeEnabled && state.tasks.some(t => t.status !== 'selesai')) {
       n.cancel([ID_IDLE]).then(() => n.schedule([{
@@ -2169,10 +3018,11 @@
     window.api.notif.onTap((goto) => { if (goto) goToView(goto); });
     window.api.onBack(handleBack);
     window.api.onAppState((active) => { if (active) onAppActive(); else onAppInactive(); });
+    window.api.onFullScreenChange(onFullScreenChange);
     document.addEventListener('pointerdown', unlockAudio, { passive: true });
     window.addEventListener('pagehide', () => { flushSave(); });
 
-    // tema "ikuti sistem" ikut berubah saat HP pindah mode gelap/terang
+    // tema "ikuti sistem" ikut berubah saat perangkat pindah mode gelap/terang
     try {
       window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (state.theme === 'system') applyTheme(); });
     } catch (_) { /* abaikan */ }
@@ -2188,6 +3038,23 @@
     const syncModalFlag = () => document.body.classList.toggle('has-modal', !!document.querySelector('.modal-overlay.is-open'));
     const mo = new MutationObserver(syncModalFlag);
     document.querySelectorAll('.modal-overlay').forEach(el => mo.observe(el, { attributes: true, attributeFilter: ['class'] }));
+
+    // EdDOC: kelas pembuka dokumen dipasang di .content (pengganti :has())
+    const ev = document.getElementById('view-eddoc');
+    if (ev) new MutationObserver(syncDocOpenClass).observe(ev, { attributes: true, attributeFilter: ['class'] });
+    syncDocOpenClass();
+
+    // Village (HP): dok bangun bisa dilipat, dan teks status sesi bisa dibuka penuh dengan ketukan
+    const dockBtn = document.getElementById('desaDockToggle'), desaStage = document.getElementById('desaStage');
+    if (dockBtn && desaStage) {
+      dockBtn.addEventListener('click', () => {
+        const open = desaStage.classList.toggle('dock-open');
+        dockBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        window.dispatchEvent(new Event('resize'));
+      });
+    }
+    const desaSess = document.querySelector('.desa-session');
+    if (desaSess) desaSess.addEventListener('click', () => desaSess.classList.toggle('is-open'));
 
     initDataIO();
     setTimeout(() => { syncReminders(false); }, 1500);
@@ -2222,26 +3089,27 @@
         const looksRight = obj && typeof obj === 'object' && !Array.isArray(obj)
           && (Array.isArray(obj.tasks) || Array.isArray(obj.citations) || Array.isArray(obj.notes));
         if (!looksRight) throw new Error('bukan berkas cadangan Readlify');
-        if (!confirm('Impor akan MENGGANTI semua data saat ini (tugas, daftar pustaka, catatan, pengaturan) dengan isi berkas ini. Lanjutkan?')) return;
+        if (!confirm('Impor akan MENGGANTI semua data saat ini (tugas, daftar pustaka, catatan, pencapaian, Village, pengaturan) dengan isi berkas ini. Lanjutkan?')) return;
 
         const base = DEFAULT_STATE();
         const incoming = Object.assign(base, obj, {
           pomodoro: Object.assign(DEFAULT_STATE().pomodoro, obj.pomodoro || {}),
           reminders: Object.assign(DEFAULT_STATE().reminders, obj.reminders || {}),
           reminderLog: Object.assign(DEFAULT_STATE().reminderLog, obj.reminderLog || {}),
+          focusSettings: Object.assign(DEFAULT_STATE().focusSettings, obj.focusSettings || {}),
         });
         incoming.tasks = (Array.isArray(obj.tasks) ? obj.tasks : []).filter(t => t && typeof t === 'object').map(t => ({
           ...t,
           id: t.id || uid(),
           title: String(t.title || 'Tugas tanpa judul'),
-          type: TASK_TYPE_LABEL[t.type] ? t.type : 'lainnya',
+          type: OLD_TASK_TYPE[t.type] || (TASK_TYPE_LABEL[t.type] ? t.type : 'lainnya'),
           status: ['belum', 'berjalan', 'selesai'].includes(t.status) ? t.status : 'belum',
           priority: ['santai', 'normal', 'penting'].includes(t.priority) ? t.priority : 'normal',
           course: t.course || '', due: t.due || '',
           subtasks: Array.isArray(t.subtasks) ? t.subtasks.filter(s => s && s.text).map(s => ({ ...s, id: s.id || uid(), done: !!s.done })) : [],
         }));
         incoming.citations = Array.isArray(obj.citations) ? obj.citations : [];
-        incoming.notes = Array.isArray(obj.notes) ? obj.notes : [];
+        incoming.notes = Array.isArray(obj.notes) ? obj.notes.map(normalizeNote) : [];
         incoming.mood = obj.mood && typeof obj.mood === 'object' ? obj.mood : { date: '', value: '' };
         incoming.reminderLog.deadlineAt = {}; incoming.reminderLog.overdueAt = {};
         incoming.timerRun = null;
@@ -2269,4 +3137,3 @@
 
   boot().catch(showFatal);
 })();
-

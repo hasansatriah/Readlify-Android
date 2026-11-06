@@ -1,11 +1,12 @@
 # Readlify untuk Android 📖
 
-> **Readlify** — asisten kuliah anda. Tugas yang dipecah jadi langkah kecil, timer Pomodoro,
-> daftar pustaka APA 7th, dan pengingat yang lembut. Dirancang tenang dan ramah ADHD.
+> **Readlify** — teman belajar & kerja yang cozy dan ramah ADHD. Tugas yang dipecah jadi langkah kecil, Pomodoro & Mode Fokus,
+> pembaca dokumen EdDOC, daftar pustaka 5 gaya, Village, dan pengingat yang lembut. Versi HP & tablet Android dari Readlify untuk Windows.
 >
-> *English: a calm, ADHD-friendly study companion for university students — tasks broken into small steps,
-> Pomodoro timer, APA 7th reference builder, and gentle reminders. Fully offline: no account, no server,
-> no ads, no tracking. Android app (Capacitor), open source (MIT). UI language: Indonesian.*
+> *English: a calm, ADHD-friendly study & work companion — tasks in small steps, Pomodoro + full-screen Focus Mode,
+> EdDOC document reader, citation builder, gamified Village and gentle reminders. Fully offline: no account, no server,
+> no ads, no tracking. Android app (Capacitor) for phones and tablets (incl. Huawei MatePad T, no Google services needed),
+> open source (MIT). UI language: Indonesian.*
 
 <p align="center">
   <img src="docs/screenshots/phone-beranda.png" width="19%" alt="Beranda di HP" />
@@ -17,11 +18,13 @@
 </p>
 
 ## Fitur
-- **Tugas** praktikum, makalah, dan lainnya, dengan **langkah-langkah kecil** supaya tidak terasa berat;
-  tenggat boleh dikosongkan dulu kalau belum pasti.
+- **Tugas** (kerja, belajar, pribadi) dengan **langkah-langkah kecil** supaya tidak terasa berat.
 - **Pomodoro** yang tetap jalan saat layar mati; alarm lewat notifikasi, dengan 5 pilihan suara.
-- **Daftar Pustaka** otomatis bergaya Harvard–APA 7th edition, plus **Panduan Format** skripsi.
-- **Catatan Cepat** untuk memindahkan pikiran yang mengganggu supaya fokus tetap terjaga.
+- **Mode Fokus** layar penuh + pengingat "balik fokus" kalau kamu pindah app.
+- **EdDOC**: baca PDF, Word, ODT, RTF, TXT dan lainnya; kutip + sitasi sekali ketuk; pustaka folder.
+- **Daftar Pustaka** APA 7, MLA 9, Chicago, IEEE, Vancouver.
+- **Pencapaian** dan **Village**: kampung kecil yang tumbuh dari sesi fokusmu.
+- **Catatan** ala Keep: warna, sematkan, daftar centang, cari.
 - **Pengingat lembut**: jam belajar, tenggat (H-3 / H-1 / Hari H), dan dorongan ringan, tidak menghakimi,
   tidak berulang-ulang.
 - Tema terang/gelap, **Ekspor/Impor cadangan** (.json), dan bisa memindahkan data dari
@@ -31,16 +34,19 @@
 ### Tampilan adaptif
 | Layar | Tampilan |
 |---|---|
-| HP | tab bar bawah, tab status tugas, form berbentuk bottom sheet |
-| Tablet kecil potret (600–767px) | sidebar ramping (ikon), konten satu kolom |
-| Tablet (≥ 768px) | sidebar penuh, papan tugas 2–3 kolom, dialog di tengah, seperti versi desktop |
+| HP (sisi layar terpendek < 500 dp) | tab bar bawah, tab status tugas, form berbentuk bottom sheet |
+| Tablet kecil potret (500–767 dp, mis. MatePad T8) | tampilan desktop dengan sidebar ikon |
+| Tablet (≥ 768 dp) | **sama dengan versi desktop**: sidebar penuh, papan tugas 2–3 kolom, dialog di tengah |
+
+Huawei MatePad T dan perangkat Huawei/Honor tanpa layanan Google didukung: aplikasi tidak memakai GMS/HMS.
+Lihat [docs/HUAWEI.md](docs/HUAWEI.md).
 
 ## Unduh
 Ambil `.apk` terbaru di halaman **[Releases](../../releases)**, kirim ke HP, lalu buka (izinkan
 "pasang dari sumber ini" jika diminta). Butuh **Android 7.0 (API 24)** atau lebih baru. Berkas `.aab` untuk Google Play
 juga disertakan di Releases.
 
-> Status: dicoba di Oppo F11 dan satu tablet Android. Notifikasi dan alarm di latar belakang bergantung
+> Status: versi 1.3.0 diuji di emulasi browser (HP, tablet potret & lanskap); uji perangkat nyata (termasuk Huawei MatePad T) masih dibutuhkan. Notifikasi dan alarm di latar belakang bergantung
 > pada pabrikan (penghemat baterai ColorOS/MIUI/OneUI, dll.). Laporan dari perangkat lain sangat
 > membantu, lihat [Issues](../../issues).
 
@@ -59,10 +65,11 @@ Setelah mengubah `www/`: `npm run android:sync`.
 
 ## Struktur
 ```
-www/                   aplikasi web yang dibungkus Capacitor (index.html, styles.css, app.js, bridge.js)
+www/                   aplikasi web yang dibungkus Capacitor (index.html, styles.css, app.js, bridge.js,
+                       eddoc.js, desa.js, achievements.js, docs-store.js, docs-parse.js, vendor/)
 resources/native/      ikon notifikasi + 5 suara alarm (.wav), dipasang ke android/ saat build
 assets/                sumber ikon & splash (dibuat dari logo)
-scripts/               prepare-android.mjs (penyiapan build), generator ikon & suara
+scripts/               prepare-android.mjs (penyiapan build), build-web.mjs (pustaka pihak ketiga), check-compat.mjs, generator ikon & suara
 .github/workflows/     build APK + AAB otomatis
 docs/                  panduan tanda tangan, tangkapan layar
 ```
@@ -80,6 +87,6 @@ Memberi bintang ⭐, melaporkan bug, atau bercerita ke teman juga sangat berarti
 
 ## Lisensi
 [MIT](LICENSE). Font Nunito: SIL Open Font License (`www/fonts/NUNITO-OFL-LICENSE.txt`). Capacitor dan
-pluginnya: MIT. Nama dan logo Readlify sebaiknya tidak dipakai untuk versi modifikasi (fork).
+pluginnya: MIT. PDF.js (Apache-2.0), mammoth (BSD-2), JSZip (MIT/GPL, dipakai sebagai MIT): lisensinya ada di `www/vendor/`. Nama dan logo Readlify sebaiknya tidak dipakai untuk versi modifikasi (fork).
 
 Aplikasi ini dibuat dengan bantuan alat AI, lalu ditinjau dan disempurnakan oleh pengembang.

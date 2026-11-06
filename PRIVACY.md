@@ -1,13 +1,13 @@
 # Kebijakan Privasi Readlify
 
-*Terakhir diperbarui: 10 Oktober 2026*
+*Terakhir diperbarui: 6 November 2026*
 
 Ringkasnya: **Readlify tidak mengumpulkan data apa pun tentangmu.** Semua yang kamu tulis di
 aplikasi tinggal di HP/tablet-mu.
 
 ## Data apa yang disimpan, dan di mana?
 Nama panggilan, tugas dan langkah-langkahnya, daftar pustaka, catatan cepat, suasana hati harian,
-kemajuan Pomodoro, dan pengaturan. Semuanya disimpan **di penyimpanan internal aplikasi di
+kemajuan Pomodoro, pencapaian, Village, dan pengaturan. Dokumen yang kamu masukkan ke pustaka EdDOC disalin ke penyimpanan privat aplikasi (folder `Readlify/Dokumen`); tidak pernah diunggah dan dihapus bersama aplikasinya. Semuanya disimpan **di penyimpanan internal aplikasi di
 perangkatmu** (Capacitor Preferences). Tidak ada akun, tidak ada server, tidak ada cloud milik pengembang.
 
 ## Apa yang *tidak* ada
@@ -24,7 +24,7 @@ Pengembang tidak bisa melihat, mengambil, atau memulihkan datamu.
 | Internet | hanya agar tautan (mis. donasi) bisa dibuka di browser. Aplikasi sendiri tidak mengirim data. |
 
 ## Cadangan data
-Fitur **Ekspor cadangan** membuat berkas `.json` dan membukanya lewat menu Bagikan Android. Kamu yang
+Fitur **Ekspor cadangan** (dan *Simpan .txt* di Catatan) membuat berkas lalu membukanya lewat menu Bagikan Android. Kamu yang
 menentukan ke mana berkas itu dikirim atau disimpan. Perlu diingat: sistem Android/Google dapat ikut
 mencadangkan data aplikasi sesuai pengaturan cadangan di perangkatmu; itu di luar kendali Readlify.
 

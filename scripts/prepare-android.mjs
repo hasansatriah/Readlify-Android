@@ -8,6 +8,8 @@
  *  3. Mengaktifkan tampilan edge-to-edge di MainActivity (disarankan Capacitor 8)
  *       -> matikan dengan EDGE_TO_EDGE=0 kalau build bermasalah
  *  4. Kalau env KEYSTORE_PATH diisi: pasang signing config untuk build release
+ *  5. AndroidManifest: largeHeap (PDF besar di tablet RAM kecil, mis. Huawei MatePad T) dan
+ *     pastikan orientasi TIDAK dikunci (HP & tablet boleh diputar; tablet memakai tata letak desktop)
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -98,6 +100,21 @@ public class MainActivity extends BridgeActivity {
     console.log('• MainActivity: edge-to-edge aktif');
   } else {
     console.warn('! MainActivity.java tidak ditemukan di', mainPath);
+  }
+}
+
+// 5) AndroidManifest: tablet RAM kecil + orientasi bebas ---------------------
+{
+  const manifestPath = path.join(androidDir, 'app', 'src', 'main', 'AndroidManifest.xml');
+  if (fs.existsSync(manifestPath)) {
+    let m = read(manifestPath);
+    const before = m;
+    if (!/android:largeHeap=/.test(m)) m = m.replace(/<application\b/, '<application\n        android:largeHeap="true"');
+    m = m.replace(/\s+android:screenOrientation="[^"]*"/g, ''); // jangan kunci orientasi
+    if (m !== before) fs.writeFileSync(manifestPath, m);
+    console.log('• AndroidManifest: largeHeap aktif, orientasi bebas');
+  } else {
+    console.warn('! AndroidManifest.xml tidak ditemukan di', manifestPath);
   }
 }
 console.log('Selesai.');
